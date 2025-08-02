@@ -2,8 +2,8 @@
 CPA Implementation - Certified Propagation Algorithm for Reliable Broadcast
 """
 
-from node import Node
 from CPA import CPA
+from node import Node
 
-__all__ = ['Node', 'CPA']
-__version__ = '0.1.0' 
+__all__ = ["CPA", "Node"]
+__version__ = "0.1.0"
