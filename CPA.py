@@ -1,5 +1,5 @@
 from adversary import ByzantineEquivocator
-from graphs import build_line_graph
+from graphs import build_line_graph, build_complete_graph, build_complete_multipartite_graph
 from network import Message, Network
 from utils import sample_t_local_faulty_set
 
@@ -88,8 +88,10 @@ class HonestCPA(Behavior):
             node.already_broadcast = True
         return out
 
-def run_cpa_with_adversary(n=10, dealer_id=0, dealer_value=1, t=1, seed=7):
-    nodes = build_line_graph(n, dealer_id)
+def run_cpa_with_adversary(n=10, dealer_id=0, dealer_value=1, t=0, seed=None):
+    #nodes = build_line_graph(n, dealer_id)
+    #nodes = build_complete_graph(n, dealer_id)
+    nodes = build_complete_multipartite_graph(n, dealer_id, (3,3,3))
     adj = {i: set(nodes[i].neighbors) for i in nodes}
 
     # sample a t-local faulty set
@@ -134,4 +136,9 @@ def run_cpa_with_adversary(n=10, dealer_id=0, dealer_value=1, t=1, seed=7):
                 print(f"Node {i} decided on: {node.value}")
 
     decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
+
+
+    #nodes = build_complete_graph(n, dealer_id)
+    #print(nodes)
+
     return decided, B
