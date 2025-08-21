@@ -9,62 +9,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from cryptography.hazmat.primitives import serialization
+from node import Behavior
 import collections
 
-ROUNDS = 100
-
-class Behavior:
-    def on_round(self, node, rnd):
-        """Return list of (neighbor_id, Message) to send this round."""
-        return []
-
-    def on_receive(self, node, msg: Message):
-        """Update node state on message reception."""
-
-class CPA:
-    def __init__(self, nodes, dealer, value, t):
-        self.nodes = nodes
-        self.dealer = dealer
-        self.value = value
-        self.t = t
-
-    def run(self):
-        print("CPA started")
-
-        self.dealer.set_value(self.value)
-        self.dealer.set_decided(True)
-
-        for node in self.dealer.get_neighbours():
-            self.dealer.propose_value(self.value, node)
-            node.set_value(self.value)
-            node.set_decided(True)
-            for neighbour in node.get_neighbours():
-                node.propose_value(self.value, neighbour)
-
-
-        for round in range(ROUNDS):
-            for node in self.nodes:
-                if node.get_decided():
-                    continue
-                for value in node.get_potential_values():
-                    if node.get_potential_values()[value] > self.t:
-                        print(f"Node {node.get_id()} decided on value {value} in round {round}")
-                        node.set_value(value)
-                        node.set_decided(True)
-                        for neighbour in node.get_neighbours():
-                            node.propose_value(value, neighbour)
-
-        print("CPA finished")
-
-    def get_nodes(self):
-        return self.nodes
-
-    def get_dealer(self):
-        return self.dealer
-
-    def get_value(self):
-        return self.value
+ROUNDS = 100  # legacy constant no longer used; kept for compatibility if referenced elsewhere
 
 class HonestCPA(Behavior):
     def __init__(self, dealer_id, t):
@@ -120,6 +68,70 @@ def _graph_diameter_from_dealer(adj: dict[int, set[int]], dealer_id: int) -> int
                 dist[v] = dist[u] + 1
                 q.append(v)
     return max(dist.values()) if dist else 0
+
+
+def minimum_m_level_ordering_exists(adj: dict[int, set[int]], dealer_id: int, m: int) -> bool:
+    # Algorithm from CPAjournal.pdf: existence check of a minimum m-level ordering
+    counters = {v: 0 for v in adj}
+    q = collections.deque()
+    enqueued = set()
+
+    # Step 2: enqueue dealer and all its neighbors
+    q.append(dealer_id)
+    enqueued.add(dealer_id)
+    for nb in adj.get(dealer_id, set()):
+        if nb not in enqueued:
+            q.append(nb)
+            enqueued.add(nb)
+
+    # Steps 3-4: process
+    while q:
+        u = q.popleft()
+        for v in adj.get(u, set()):
+            counters[v] += 1
+            if v not in enqueued and counters[v] >= m:
+                q.append(v)
+                enqueued.add(v)
+
+    # Step 5: all nodes must have been enqueued
+    return len(enqueued) == len(adj)
+
+
+def compute_K(adj: dict[int, set[int]], dealer_id: int) -> int:
+    # K(G,D) = max m in N such that a minimum m-level ordering exists
+    # Monotone in m, so increase until it fails
+    n = len(adj)
+    last_ok = 0
+    for m in range(0, n + 1):
+        if minimum_m_level_ordering_exists(adj, dealer_id, m):
+            last_ok = m
+        else:
+            break
+    return last_ok
+
+
+def predict_cpa_outcome(adj: dict[int, set[int]], dealer_id: int, t: int) -> tuple[int, str]:
+    # Heuristic based on literature: CPA succeeds if t < K(G,D)
+    K = compute_K(adj, dealer_id)
+    verdict = "succeeds" if t < K else ("fails" if t >= K else "unknown")
+    return K, verdict
+
+
+def evaluate_execution(decided: dict[int, tuple[bool, int | None]], B: set[int], dealer_value: int, dealer_id: int) -> tuple[bool, list[int]]:
+    """Return (success, bad_honest_nodes).
+
+    success = True iff every honest node (not in B) decided on dealer_value.
+    bad_honest_nodes lists honest node ids that either did not decide or decided on a different value.
+    """
+    bad: list[int] = []
+    for nid, (did_decide, val) in decided.items():
+        if nid in B:
+            continue
+        # Dealer is honest by construction and should have dealer_value
+        expected = dealer_value
+        if not did_decide or val != expected:
+            bad.append(nid)
+    return (len(bad) == 0, bad)
 
 
 def run_cpa_with_adversary(

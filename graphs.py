@@ -24,5 +24,4 @@ def build_complete_graph(n, dealer_id=0):
 def build_complete_multipartite_graph(n, dealer_id=0, subset_sizes=(4, 3, 3)):
     # subset_sizes can be like (4, 3, 3) or (range(0,4), range(4,7), range(7,10))
     G = nx.complete_multipartite_graph(*subset_sizes)
-    print(sorted(G.edges()))  
     return nodes_from_networkx(G)

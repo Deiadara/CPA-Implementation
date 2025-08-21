@@ -1,5 +1,11 @@
 import argparse
-from CPA import run_cpa_with_adversary, run_cpa_with_dealer_signature, run_cpa_with_per_node_threshold
+from CPA import (
+    run_cpa_with_adversary,
+    run_cpa_with_dealer_signature,
+    run_cpa_with_per_node_threshold,
+    predict_cpa_outcome,
+    evaluate_execution,
+)
 
 
 def parse_args_once():
@@ -10,7 +16,7 @@ def parse_args_once():
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
     parser.add_argument("--dealer-value", type=int, default=1, help="Dealer value")
     parser.add_argument("--t", type=int, default=3, help="t for t-local faults (sampling); ignored when --exec per_node_t")
-    parser.add_argument("--t-func", type=int, choices=[1,2,3,4,5,6], default=1, help="Per-node t(u) function when --exec per_node_t: 1) t(u)=1; 2) t(u)=u; 3) t(u)=u^2; 4) t(u)=u%2; 5) t(u)=u%5; 6) t(u)=rand(0,n)")
+    parser.add_argument("--t-func", type=int, choices=[1,2,3,4,5,6], default=1, help="Per-node t(u) function when --exec per_node_t: 1) t(u)=1; 2) t(u)=u; 3) t(u)=u^2; 4) t(u)=u%%2; 5) t(u)=u%%5; 6) t(u)=rand(0,n)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for fault sampling")
     parser.add_argument("--subset-sizes", type=str, default="3,3,3", help="Subset sizes for complete_multipartite, e.g. 3,3,3")
     return parser
@@ -53,6 +59,21 @@ def run_once(args):
     for i, (d, v) in sorted(decided.items()):
         print(f"Node {i}: decided={d}, value={v}")
 
+    # Evaluate actual execution success (honest nodes decided on dealer value)
+    success, bad_nodes = evaluate_execution(decided, B, args.dealer_value, args.dealer_id)
+    if success:
+        print("Execution result: SUCCESS (all honest nodes decided on dealer's value)")
+    else:
+        print(f"Execution result: FAILURE (honest nodes not agreeing): {sorted(bad_nodes)}")
+
+    # Predict outcome for plain CPA based on K when relevant (graph + t available)
+    if args.exec in {"plain", "signed"}:
+        from CPA import _build_graph  # reuse to ensure same adjacency
+        nodes_tmp = _build_graph(args.graph, args.n, args.dealer_id, subset_sizes)
+        adj_tmp = {i: set(nodes_tmp[i].neighbors) for i in nodes_tmp}
+        K_val, verdict = predict_cpa_outcome(adj_tmp, args.dealer_id, args.t)
+        print(f"K(G,D)={K_val}; predicted plain CPA outcome at t={args.t}: {verdict}")
+
 
 if __name__ == "__main__":
     parser = parse_args_once()
@@ -92,12 +113,15 @@ if __name__ == "__main__":
             break
         if not line:
             continue
-        if line in {"help", "?"}:
+        if line in {"help", "?", "-h", "--help"}:
             print_help()
             continue
         if line in {"quit", "exit"}:
             break
         try:
+            if line in {"-h", "--help"}:
+                print_help()
+                continue
             args = parser.parse_args(shlex.split(line))
             run_once(args)
         except SystemExit:
