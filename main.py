@@ -1,15 +1,16 @@
 import argparse
-from CPA import run_cpa_with_adversary, run_cpa_with_dealer_signature
+from CPA import run_cpa_with_adversary, run_cpa_with_dealer_signature, run_cpa_with_per_node_threshold
 
 
 def parse_args_once():
     parser = argparse.ArgumentParser(description="Run CPA or CPA-with-signatures.")
-    parser.add_argument("--exec", choices=["plain", "signed"], default="plain", help="Execution type")
+    parser.add_argument("--exec", choices=["plain", "signed", "per_node_t"], default="plain", help="Execution type")
     parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite"], default="complete_multipartite", help="Graph type")
     parser.add_argument("--n", type=int, default=10, help="Number of nodes")
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
     parser.add_argument("--dealer-value", type=int, default=1, help="Dealer value")
-    parser.add_argument("--t", type=int, default=3, help="t for t-local faults (sampling)")
+    parser.add_argument("--t", type=int, default=3, help="t for t-local faults (sampling); ignored when --exec per_node_t")
+    parser.add_argument("--t-func", type=int, choices=[1,2,3,4,5,6], default=1, help="Per-node t(u) function when --exec per_node_t: 1) t(u)=1; 2) t(u)=u; 3) t(u)=u^2; 4) t(u)=u%2; 5) t(u)=u%5; 6) t(u)=rand(0,n)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for fault sampling")
     parser.add_argument("--subset-sizes", type=str, default="3,3,3", help="Subset sizes for complete_multipartite, e.g. 3,3,3")
     return parser
@@ -35,8 +36,18 @@ def run_once(args):
 
     if args.exec == "plain":
         decided, B = run_cpa_with_adversary(**common_kwargs)
-    else:
+    elif args.exec == "signed":
         decided, B = run_cpa_with_dealer_signature(**common_kwargs)
+    else:
+        decided, B = run_cpa_with_per_node_threshold(
+            n=args.n,
+            dealer_id=args.dealer_id,
+            dealer_value=args.dealer_value,
+            t_func_id=args.t_func,
+            seed=args.seed,
+            graph=args.graph,
+            subset_sizes=subset_sizes,
+        )
 
     print("Byzantine set (t-local):", B)
     for i, (d, v) in sorted(decided.items()):
@@ -54,10 +65,22 @@ if __name__ == "__main__":
         print("- line: uses --n, --dealer-id, --dealer-value, --t, --seed")
         print("- complete: uses --n, --dealer-id, --dealer-value, --t, --seed")
         print("- complete_multipartite: additionally uses --subset-sizes (e.g. 4,3,3)\n")
+        print("Execution modes:")
+        print("- plain: classic CPA, decides at t+1")
+        print("- signed: CPA with dealer signature, no threshold; accept only dealer-signed value")
+        print("- per_node_t: CPA with per-node threshold t(u); decides at t(u)+1\n")
+        print("t(u) functions (for per_node_t):")
+        print("  1) t(u) = 1")
+        print("  2) t(u) = u  (u = 1-based node index)")
+        print("  3) t(u) = u^2")
+        print("  4) t(u) = u % 2")
+        print("  5) t(u) = u % 5")
+        print("  6) t(u) = rand(0, n)\n")
         print("Examples:")
         print("  --exec plain  --graph complete --n 10 --dealer-id 0 --dealer-value 1 --t 3")
         print("  --exec signed --graph complete_multipartite --subset-sizes 4,3,3 --n 10 --dealer-id 0 --dealer-value 1 --t 3")
-        print("  --exec signed --graph line --n 8  --seed 42\n")
+        print("  --exec per_node_t --t-func 4 --graph line --n 8 --seed 42")
+        print("  --exec signed --graph line --n 8 --seed 42\n")
         print("Other commands:")
         print("  help  | ?   Show this help")
         print("  exit  | quit  Exit the REPL\n")

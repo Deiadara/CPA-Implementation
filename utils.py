@@ -1,10 +1,5 @@
 import random
 
-
-def connect_nodes(n1, n2):
-    n1.add_neighbour(n2)
-    n2.add_neighbour(n1)
-
 def sample_t_local_faulty_set(adj: dict[int, set[int]], t, p_try=0.3, seed=None):
 
     rng = random.Random(seed)

@@ -1,5 +1,18 @@
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from network import Message
+
+
+class Behavior:
+    def on_round(self, node, rnd):
+        """Return list of (neighbor_id, Message-like) to send this round."""
+        return []
+
+    def on_receive(self, node, msg):
+        """Update node state on message reception."""
+        pass
 
 class Node:
     def __init__(self, node_id, behavior: Optional["Behavior"] = None):
