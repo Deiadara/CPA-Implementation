@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [build-system]
@@ -19,7 +20,7 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 target-version = "py311"
 line-length = 88
-select = ["E", "F", "I", "N", "W", "B", "A", "C4", "UP", "ARG", "PIE", "T20", "Q", "SIM", "TCH", "TID", "TCH", "ARG", "PIE", "LOG", "RUF"]
+select = ["E", "F", "I", "N", "W", "B", "A", "C4", "UP", "ARG", "PIE", "T20", "Q", "SIM", "TID", "ARG", "PIE", "LOG", "RUF"]
 ignore = ["E501"]
 
 [tool.mypy]
