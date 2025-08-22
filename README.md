@@ -1,7 +1,7 @@
 # CPA-Implementation
 An implementation of the Certified Propagation Algorithm for Reliable Broadcast
 
-Two different executions of CPA are currently supported, with different graph types:
+The different executions of CPA currently supported, with various graph types:
 
 --Plain Execution--
 
