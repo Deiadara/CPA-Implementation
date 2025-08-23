@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from cryptography.exceptions import InvalidSignature
 from node import Behavior
 import collections
 
@@ -110,28 +111,33 @@ def compute_K(adj: dict[int, set[int]], dealer_id: int) -> int:
     return last_ok
 
 
-def predict_cpa_outcome(adj: dict[int, set[int]], dealer_id: int, t: int) -> tuple[int, str]:
+def predict_cpa_outcome_for_constant_t(adj: dict[int, set[int]], dealer_id: int, t: int) -> tuple[int, str]:
     # Heuristic based on literature: CPA succeeds if t < K(G,D)
     K = compute_K(adj, dealer_id)
-    verdict = "succeeds" if t < K else ("fails" if t >= K else "unknown")
+    verdict = "succeeds" if 2*t < K else ("fails" if t >= K else "unknown")
     return K, verdict
 
+def predict_cpa_outcome_for_constant_t_and_signatures(adj: dict[int, set[int]], dealer_id: int, t: int) -> tuple[int, str]:
+    # Heuristic based on literature: CPA succeeds if t < K(G,D)
+    K = compute_K(adj, dealer_id)
+    verdict = "succeeds" if t < K else "fails"
+    return K, verdict
 
-def evaluate_execution(decided: dict[int, tuple[bool, int | None]], B: set[int], dealer_value: int, dealer_id: int) -> tuple[bool, list[int]]:
-    """Return (success, bad_honest_nodes).
+def evaluate_execution(decided: dict[int, tuple[bool, int | None]], B: set[int], dealer_value: int) -> tuple[bool, list[int]]:
+    """Return (success, corrupted).
 
     success = True iff every honest node (not in B) decided on dealer_value.
-    bad_honest_nodes lists honest node ids that either did not decide or decided on a different value.
+    undesired lists honest node ids that either did not decide or decided on a different value.
     """
-    bad: list[int] = []
-    for nid, (did_decide, val) in decided.items():
+    undesired: list[int] = []
+    for nid, (decided, val) in decided.items():
         if nid in B:
             continue
         # Dealer is honest by construction and should have dealer_value
         expected = dealer_value
-        if not did_decide or val != expected:
-            bad.append(nid)
-    return (len(bad) == 0, bad)
+        if not decided or val != expected:
+            undesired.append(nid)
+    return (len(undesired) == 0, undesired)
 
 
 def run_cpa_with_adversary(
@@ -227,7 +233,7 @@ class HonestCPAWithDealerSignature(Behavior):
             return
         try:
             self.dealer_public_key.verify(signature, _encode_value_bytes(msg.value))
-        except Exception:
+        except InvalidSignature:
             return
         if not node.decided:
             node.decide(msg.value)
@@ -407,7 +413,7 @@ def run_cpa_with_per_node_threshold(
     B.discard(dealer_id)
     print(f"Graph topology: {adj}")
     print(f"Byzantine set (t(u)-local): {B}")
-    print(f"t(u) map: {{nid: t_map[nid] for nid in sorted(t_map)}}")
+    print(f"t(u) map: { {nid: t_map[nid] for nid in sorted(t_map)} }")
 
     # assign behaviors
     for i in nodes:
@@ -429,6 +435,119 @@ def run_cpa_with_per_node_threshold(
     initial_out = []
     for nid in nodes[dealer_id].neighbors:
         initial_out.append((nid, Message("PROPOSE", dealer_id, dealer_value, 0)))
+        print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
+    net.deliver(initial_out)
+
+    max_dist = _graph_diameter_from_dealer(adj, dealer_id)
+    rounds = max_dist + 1
+    for r in range(1, rounds + 1):
+        print(f"\n--- Round {r} ---")
+        net.run_round(r)
+        for i in sorted(nodes.keys()):
+            node = nodes[i]
+            if node.decided:
+                print(f"Node {i} decided on: {node.value}")
+
+    decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
+    return decided, B
+
+
+# ---------------- Combined: dealer signature + per-node threshold t(u) ---------------
+
+class HonestCPAWithDealerSignatureAndPerNodeT(Behavior):
+    def __init__(self, dealer_public_key: Ed25519PublicKey, t_map: dict[int, int], dealer_id: int):
+        self.dealer_public_key = dealer_public_key
+        self.t_map = t_map
+        self.dealer_id = dealer_id
+
+    def on_receive(self, node, msg):
+        # Accept only messages that carry a valid dealer signature for the value
+        if getattr(msg, "mtype", None) != "PROPOSE":
+            return
+        signature = getattr(msg, "signature", None)
+        if signature is None:
+            return
+        try:
+            self.dealer_public_key.verify(signature, _encode_value_bytes(msg.value))
+        except InvalidSignature:
+            return
+        # Track receipt for thresholding and note dealer-origin value visibility
+        node.received_from[msg.value].add(msg.sender)
+        if msg.sender == self.dealer_id:
+            node.seen_from_dealer.add(msg.value)
+        # Store signature so we can forward it if/when we decide
+        if not getattr(node, "dealer_signature", None):
+            setattr(node, "dealer_signature", signature)
+
+    def on_round(self, node, rnd):
+        out = []
+        if not node.decided:
+            # Immediate decide if saw dealer value
+            for v in node.seen_from_dealer:
+                node.decide(v)
+
+            # Otherwise threshold-based decide using t(u)
+            if not node.decided:
+                threshold = self.t_map.get(node.id, 1) + 1
+                for v, senders in node.received_from.items():
+                    if len(senders) >= threshold:
+                        node.decide(v)
+                        break
+
+        if node.decided and not node.already_broadcast:
+            sig: Optional[bytes] = getattr(node, "dealer_signature", None)
+            for nid in node.neighbors:
+                out.append((nid, SignedMessage("PROPOSE", node.id, node.value, rnd, sig)))
+            node.already_broadcast = True
+        return out
+
+
+def run_cpa_with_dealer_signature_and_per_node_threshold(
+    n: int = 10,
+    dealer_id: int = 0,
+    dealer_value: int = 1,
+    t_func_id: int = 1,
+    seed: Optional[int] = None,
+    graph: str = "complete_multipartite",
+    subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+):
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes)
+    adj = {i: set(nodes[i].neighbors) for i in nodes}
+
+    # Build per-node thresholds t(u) and sample faulty set accordingly
+    t_map = build_tu_map(nodes, t_func_id, n, seed)
+    B = sample_tu_local_faulty_set(adj, t_map, seed=seed)
+    B.discard(dealer_id)
+    print(f"Graph topology: {adj}")
+    print(f"Byzantine set (t(u)-local): {B}")
+    print(f"t(u) map: { {nid: t_map[nid] for nid in sorted(t_map)} }")
+
+    # Dealer keypair
+    dealer_private_key: Ed25519PrivateKey = Ed25519PrivateKey.generate()
+    dealer_public_key: Ed25519PublicKey = dealer_private_key.public_key()
+
+    # Assign behaviors
+    for i in nodes:
+        if i == dealer_id:
+            nodes[i].behavior = HonestCPAWithDealerSignatureAndPerNodeT(dealer_public_key, t_map, dealer_id)
+            nodes[i].decide(dealer_value)
+            setattr(nodes[i], "dealer_signature", dealer_private_key.sign(_encode_value_bytes(dealer_value)))
+        elif i in B:
+            nodes[i].behavior = ByzantineEquivocator(
+                value_picker=lambda rnd: (0, 1),
+                withhold_prob=0.2,
+                spam=True,
+            )
+        else:
+            nodes[i].behavior = HonestCPAWithDealerSignatureAndPerNodeT(dealer_public_key, t_map, dealer_id)
+
+    net = Network(nodes)
+
+    # Dealer broadcasts in round 0 with signature
+    initial_out = []
+    dealer_sig = getattr(nodes[dealer_id], "dealer_signature")
+    for nid in nodes[dealer_id].neighbors:
+        initial_out.append((nid, SignedMessage("PROPOSE", dealer_id, dealer_value, 0, dealer_sig)))
         print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
     net.deliver(initial_out)
 

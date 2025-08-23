@@ -3,14 +3,15 @@ from CPA import (
     run_cpa_with_adversary,
     run_cpa_with_dealer_signature,
     run_cpa_with_per_node_threshold,
-    predict_cpa_outcome,
+    run_cpa_with_dealer_signature_and_per_node_threshold,
+    predict_cpa_outcome_for_constant_t,
     evaluate_execution,
 )
 
 
 def parse_args_once():
     parser = argparse.ArgumentParser(description="Run CPA or CPA-with-signatures.")
-    parser.add_argument("--exec", choices=["plain", "signed", "per_node_t"], default="plain", help="Execution type")
+    parser.add_argument("--exec", choices=["plain", "signed", "per_node_t", "signed_per_node_t"], default="plain", help="Execution type")
     parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite"], default="complete_multipartite", help="Graph type")
     parser.add_argument("--n", type=int, default=10, help="Number of nodes")
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
@@ -44,8 +45,18 @@ def run_once(args):
         decided, B = run_cpa_with_adversary(**common_kwargs)
     elif args.exec == "signed":
         decided, B = run_cpa_with_dealer_signature(**common_kwargs)
-    else:
+    elif args.exec == "per_node_t":
         decided, B = run_cpa_with_per_node_threshold(
+            n=args.n,
+            dealer_id=args.dealer_id,
+            dealer_value=args.dealer_value,
+            t_func_id=args.t_func,
+            seed=args.seed,
+            graph=args.graph,
+            subset_sizes=subset_sizes,
+        )
+    else:
+        decided, B = run_cpa_with_dealer_signature_and_per_node_threshold(
             n=args.n,
             dealer_id=args.dealer_id,
             dealer_value=args.dealer_value,
@@ -60,18 +71,18 @@ def run_once(args):
         print(f"Node {i}: decided={d}, value={v}")
 
     # Evaluate actual execution success (honest nodes decided on dealer value)
-    success, bad_nodes = evaluate_execution(decided, B, args.dealer_value, args.dealer_id)
+    success, bad_nodes = evaluate_execution(decided, B, args.dealer_value)
     if success:
         print("Execution result: SUCCESS (all honest nodes decided on dealer's value)")
     else:
         print(f"Execution result: FAILURE (honest nodes not agreeing): {sorted(bad_nodes)}")
 
-    # Predict outcome for plain CPA based on K when relevant (graph + t available)
-    if args.exec in {"plain", "signed"}:
+    # Predict outcome for plain CPA based on K only in constant-t case
+    if args.exec == "plain":
         from CPA import _build_graph  # reuse to ensure same adjacency
         nodes_tmp = _build_graph(args.graph, args.n, args.dealer_id, subset_sizes)
         adj_tmp = {i: set(nodes_tmp[i].neighbors) for i in nodes_tmp}
-        K_val, verdict = predict_cpa_outcome(adj_tmp, args.dealer_id, args.t)
+        K_val, verdict = predict_cpa_outcome_for_constant_t(adj_tmp, args.dealer_id, args.t)
         print(f"K(G,D)={K_val}; predicted plain CPA outcome at t={args.t}: {verdict}")
 
 
@@ -89,7 +100,8 @@ if __name__ == "__main__":
         print("Execution modes:")
         print("- plain: classic CPA, decides at t+1")
         print("- signed: CPA with dealer signature, no threshold; accept only dealer-signed value")
-        print("- per_node_t: CPA with per-node threshold t(u); decides at t(u)+1\n")
+        print("- per_node_t: CPA with per-node threshold t(u); decides at t(u)+1")
+        print("- signed_per_node_t: both dealer signatures and per-node t(u) thresholds\n")
         print("t(u) functions (for per_node_t):")
         print("  1) t(u) = 1")
         print("  2) t(u) = u  (u = 1-based node index)")
@@ -101,6 +113,7 @@ if __name__ == "__main__":
         print("  --exec plain  --graph complete --n 10 --dealer-id 0 --dealer-value 1 --t 3")
         print("  --exec signed --graph complete_multipartite --subset-sizes 4,3,3 --n 10 --dealer-id 0 --dealer-value 1 --t 3")
         print("  --exec per_node_t --t-func 4 --graph line --n 8 --seed 42")
+        print("  --exec signed_per_node_t --t-func 5 --graph complete --n 10 --seed 7")
         print("  --exec signed --graph line --n 8 --seed 42\n")
         print("Other commands:")
         print("  help  | ?   Show this help")
