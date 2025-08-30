@@ -12,24 +12,24 @@ from CPA import (
 def parse_args_once():
     parser = argparse.ArgumentParser(description="Run CPA or CPA-with-signatures.")
     parser.add_argument("--exec", choices=["plain", "signed", "per_node_t", "signed_per_node_t"], default="plain", help="Execution type")
-    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite"], default="complete_multipartite", help="Graph type")
+    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite", "complete_bipartite", "star", "hypercube"], default="complete_multipartite", help="Graph type")
     parser.add_argument("--n", type=int, default=10, help="Number of nodes")
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
     parser.add_argument("--dealer-value", type=int, default=1, help="Dealer value")
     parser.add_argument("--t", type=int, default=3, help="t for t-local faults (sampling); ignored when --exec per_node_t")
     parser.add_argument("--t-func", type=int, choices=[1,2,3,4,5,6], default=1, help="Per-node t(u) function when --exec per_node_t: 1) t(u)=1; 2) t(u)=u; 3) t(u)=u^2; 4) t(u)=u%%2; 5) t(u)=u%%5; 6) t(u)=rand(0,n)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for fault sampling")
-    parser.add_argument("--subset-sizes", type=str, default="3,3,3", help="Subset sizes for complete_multipartite, e.g. 3,3,3")
+    parser.add_argument("--subset-sizes", type=str, default="3,3,3", help="Subset sizes for complete_multipartite or complete_bipartite (e.g. 3,3,3 or 4,6)")
     return parser
 
 
 def run_once(args):
     subset_sizes = None
-    if args.graph == "complete_multipartite":
+    if args.graph in {"complete_multipartite", "complete_bipartite"}:
         try:
             subset_sizes = tuple(int(x.strip()) for x in args.subset_sizes.split(",") if x.strip())
         except Exception:
-            subset_sizes = (3, 3, 3)
+            subset_sizes = (3, 3, 3) if args.graph == "complete_multipartite" else (args.n // 2, args.n - (args.n // 2))
 
     common_kwargs = dict(
         n=args.n,
@@ -96,7 +96,10 @@ if __name__ == "__main__":
         print("Graph-specific notes:")
         print("- line: uses --n, --dealer-id, --dealer-value, --t, --seed")
         print("- complete: uses --n, --dealer-id, --dealer-value, --t, --seed")
-        print("- complete_multipartite: additionally uses --subset-sizes (e.g. 4,3,3)\n")
+        print("- complete_multipartite: additionally uses --subset-sizes (e.g. 4,3,3)")
+        print("- complete_bipartite: uses --subset-sizes as a,b (e.g. 4,6)")
+        print("- star: uses --n (creates n-1 leaves)")
+        print("- hypercube: uses --n; builds 2^d nodes with 2^d <= n (rounds down)\n")
         print("Execution modes:")
         print("- plain: classic CPA, decides at t+1")
         print("- signed: CPA with dealer signature, no threshold; accept only dealer-signed value")

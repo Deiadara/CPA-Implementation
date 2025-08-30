@@ -1,5 +1,12 @@
 from adversary import ByzantineEquivocator
-from graphs import build_line_graph, build_complete_graph, build_complete_multipartite_graph
+from graphs import (
+    build_line_graph,
+    build_complete_graph,
+    build_complete_multipartite_graph,
+    build_complete_bipartite_graph,
+    build_star_graph,
+    build_hypercube_graph,
+)
 from network import Message, Network
 from utils import sample_t_local_faulty_set
 from dataclasses import dataclass
@@ -54,6 +61,18 @@ def _build_graph(graph: str, n: int, dealer_id: int, subset_sizes: Optional[tupl
     if graph in {"complete_multipartite", "multipartite", "cmp"}:
         sizes = subset_sizes if subset_sizes is not None else (3, 3, 3)
         return build_complete_multipartite_graph(n, dealer_id, sizes)
+    if graph in {"complete_bipartite", "bipartite", "kbipartite"}:
+        sizes2 = subset_sizes if subset_sizes is not None else (n // 2, n - (n // 2))
+        # Ensure it is a 2-tuple
+        if isinstance(sizes2, tuple) and len(sizes2) >= 2:
+            sizes2 = (sizes2[0], sizes2[1])
+        else:
+            sizes2 = (n // 2, n - (n // 2))
+        return build_complete_bipartite_graph(n, dealer_id, sizes2)
+    if graph == "star":
+        return build_star_graph(n, dealer_id)
+    if graph == "hypercube":
+        return build_hypercube_graph(n, dealer_id)
     # default fallback
     return build_complete_multipartite_graph(n, dealer_id, (3, 3, 3))
 
