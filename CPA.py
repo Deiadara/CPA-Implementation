@@ -6,6 +6,7 @@ from graphs import (
     build_complete_bipartite_graph,
     build_star_graph,
     build_hypercube_graph,
+    build_custom_graph_from_json,
 )
 from network import Message, Network
 from utils import sample_t_local_faulty_set
@@ -53,7 +54,11 @@ class HonestCPA(Behavior):
             node.already_broadcast = True
         return out
 
-def _build_graph(graph: str, n: int, dealer_id: int, subset_sizes: Optional[tuple[int, ...]] = None):
+def _build_graph(graph: str, n: int, dealer_id: int, subset_sizes: Optional[tuple[int, ...]] = None, custom_graph_path: Optional[str] = None):
+    if graph == "custom":
+        if custom_graph_path is None:
+            raise ValueError("--custom-graph path must be provided when using --graph custom")
+        return build_custom_graph_from_json(custom_graph_path, dealer_id)
     if graph == "line":
         return build_line_graph(n, dealer_id)
     if graph == "complete":
@@ -167,8 +172,9 @@ def run_cpa_with_adversary(
     seed: Optional[int] = None,
     graph: str = "complete_multipartite",
     subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+    custom_graph_path: Optional[str] = None,
 ):
-    nodes = _build_graph(graph, n, dealer_id, subset_sizes)
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes, custom_graph_path)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
 
     B = sample_t_local_faulty_set(adj, t=t, seed=seed)
@@ -276,8 +282,9 @@ def run_cpa_with_dealer_signature(
     seed: Optional[int] = None,
     graph: str = "complete_multipartite",
     subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+    custom_graph_path: Optional[str] = None,
 ):
-    nodes = _build_graph(graph, n, dealer_id, subset_sizes)
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes, custom_graph_path)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
 
     # sample a t-local faulty set (t only for sampling here) and ensure dealer is never faulty
@@ -422,8 +429,9 @@ def run_cpa_with_per_node_threshold(
     seed: Optional[int] = None,
     graph: str = "complete_multipartite",
     subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+    custom_graph_path: Optional[str] = None,
 ):
-    nodes = _build_graph(graph, n, dealer_id, subset_sizes)
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes, custom_graph_path)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
 
     # build per-node thresholds and sample faulty set under t(u)
@@ -529,8 +537,9 @@ def run_cpa_with_dealer_signature_and_per_node_threshold(
     seed: Optional[int] = None,
     graph: str = "complete_multipartite",
     subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+    custom_graph_path: Optional[str] = None,
 ):
-    nodes = _build_graph(graph, n, dealer_id, subset_sizes)
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes, custom_graph_path)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
 
     # Build per-node thresholds t(u) and sample faulty set accordingly
@@ -580,5 +589,229 @@ def run_cpa_with_dealer_signature_and_per_node_threshold(
             if node.decided:
                 print(f"Node {i} decided on: {node.value}")
 
+    decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
+    return decided, B
+
+
+# ---------------- DS-CPA (Dolev-Strong with CPA) variant ----------------
+
+@dataclass
+class DSCPAMessage:
+    """Message for DS-CPA with signature chain."""
+    mtype: str
+    value: int
+    rnd: int
+    signature_chain: list[tuple[int, bytes]]  # [(node_id, signature), ...]
+    
+    def get_signers(self) -> set[int]:
+        """Return set of node IDs that signed this message."""
+        return {node_id for node_id, _ in self.signature_chain}
+
+
+class HonestDSCPA(Behavior):
+    """
+    DS-CPA (Dolev-Strong combined with CPA) behavior.
+    
+    In DS-CPA, instead of direct broadcast, each node uses CPA with signatures (σ-CPA)
+    to propagate values. This combines the robustness of Dolev-Strong with the 
+    efficiency of CPA under t-local corruption.
+    """
+    def __init__(self, sender_id: int, all_public_keys: dict[int, Ed25519PublicKey], 
+                 my_private_key: Optional[Ed25519PrivateKey], f_hat: int):
+        self.sender_id = sender_id
+        self.all_public_keys = all_public_keys  # Maps node_id -> public_key
+        self.my_private_key = my_private_key
+        self.f_hat = f_hat  # f_hat = n - 2
+        self.extracted_set = set()  # V_i in the protocol
+        self.messages_to_relay = []  # Messages to send in next round
+        self.sent_count = 0  # Track how many messages we've sent
+        
+    def on_receive(self, node, msg):
+        if not isinstance(msg, DSCPAMessage):
+            return
+            
+        # Verify the signature chain
+        if not self._verify_signature_chain(msg):
+            return
+            
+        signers = msg.get_signers()
+        
+        # Check if sender is in the signature chain
+        if self.sender_id not in signers:
+            return
+            
+        value = msg.value
+        num_signatures = len(signers)
+        
+        # Check if we should accept this message based on round
+        # In round r, we expect r signatures (including sender)
+        if num_signatures != msg.rnd:
+            return
+            
+        # If value not in extracted set, add it and prepare to relay
+        if value not in self.extracted_set:
+            self.extracted_set.add(value)
+            
+            # Prepare to relay this message with our signature added
+            if self.my_private_key and node.id not in signers:
+                new_chain = list(msg.signature_chain)
+                my_sig = self.my_private_key.sign(_encode_value_bytes(value))
+                new_chain.append((node.id, my_sig))
+                
+                self.messages_to_relay.append({
+                    'value': value,
+                    'chain': new_chain,
+                    'round': msg.rnd + 1
+                })
+    
+    def on_round(self, node, rnd):
+        out = []
+        
+        # Round 0: Only the sender broadcasts initial value
+        if rnd == 0 and node.id == self.sender_id:
+            if self.my_private_key and node.value is not None:
+                sig = self.my_private_key.sign(_encode_value_bytes(node.value))
+                chain = [(node.id, sig)]
+                self.extracted_set.add(node.value)
+                
+                # Send to all neighbors using σ-CPA
+                for nid in node.neighbors:
+                    out.append((nid, DSCPAMessage("DS-CPA", node.value, 1, chain)))
+                self.sent_count += 1
+        
+        # Rounds 1 to f_hat + 1: Relay messages
+        elif rnd > 0 and rnd <= self.f_hat + 1:
+            # Send prepared messages from previous round
+            # Limit to avoid spamming (send at most 2 messages per round as per protocol)
+            messages_to_send = [m for m in self.messages_to_relay 
+                               if m['round'] == rnd and self.sent_count < 2]
+            
+            for msg_data in messages_to_send:
+                for nid in node.neighbors:
+                    out.append((nid, DSCPAMessage("DS-CPA", msg_data['value'], 
+                                                 msg_data['round'], msg_data['chain'])))
+                self.sent_count += 1
+            
+            # Clear sent messages
+            self.messages_to_relay = [m for m in self.messages_to_relay 
+                                     if m['round'] != rnd]
+        
+        # At the end of f_hat + 1 rounds, decide
+        if rnd == self.f_hat + 1:
+            if len(self.extracted_set) == 1:
+                # Output the single value
+                node.decide(list(self.extracted_set)[0])
+            else:
+                # Output 0 (default/bottom value)
+                node.decide(0)
+        
+        return out
+    
+    def _verify_signature_chain(self, msg: DSCPAMessage) -> bool:
+        """Verify that all signatures in the chain are valid."""
+        if not msg.signature_chain:
+            return False
+            
+        for node_id, signature in msg.signature_chain:
+            if node_id not in self.all_public_keys:
+                return False
+            
+            pub_key = self.all_public_keys[node_id]
+            try:
+                pub_key.verify(signature, _encode_value_bytes(msg.value))
+            except InvalidSignature:
+                return False
+        
+        return True
+
+
+def run_ds_cpa(
+    n: int = 10,
+    sender_id: int = 0,
+    sender_value: int = 1,
+    t: int = 0,
+    seed: Optional[int] = None,
+    graph: str = "complete_multipartite",
+    subset_sizes: Optional[tuple[int, ...]] = (3, 3, 3),
+    custom_graph_path: Optional[str] = None,
+):
+    """
+    Run DS-CPA (Dolev-Strong combined with CPA) protocol.
+    
+    DS-CPA replaces each broadcast in Dolev-Strong with a CPA execution with signatures.
+    It runs for f_hat + 1 rounds where f_hat = n - 2 (since we only know t-local corruption).
+    
+    Args:
+        n: Number of nodes
+        sender_id: ID of the sender/dealer node
+        sender_value: Value to broadcast
+        t: Parameter for t-local fault sampling
+        seed: Random seed for fault sampling
+        graph: Graph type
+        subset_sizes: Subset sizes for multipartite graphs
+        custom_graph_path: Path to custom graph JSON
+    
+    Returns:
+        (decided, B) where decided maps node_id -> (decided, value) and B is Byzantine set
+    """
+    nodes = _build_graph(graph, n, sender_id, subset_sizes, custom_graph_path)
+    adj = {i: set(nodes[i].neighbors) for i in nodes}
+    
+    # Sample Byzantine nodes
+    B = sample_t_local_faulty_set(adj, t=t, seed=seed)
+    B.discard(sender_id)  # Sender is always honest
+    
+    print(f"Graph topology: {adj}")
+    print(f"Byzantine set (t-local): {B}")
+    print(f"Running DS-CPA with f_hat = {n - 2} rounds")
+    
+    # Generate keypairs for all nodes
+    private_keys = {}
+    public_keys = {}
+    for i in nodes:
+        priv_key = Ed25519PrivateKey.generate()
+        private_keys[i] = priv_key
+        public_keys[i] = priv_key.public_key()
+    
+    f_hat = n - 2
+    
+    # Assign behaviors
+    for i in nodes:
+        if i == sender_id:
+            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat)
+            nodes[i].value = sender_value
+        elif i in B:
+            # Byzantine nodes - use equivocator
+            nodes[i].behavior = ByzantineEquivocator(
+                value_picker=lambda rnd: (0, 1),
+                withhold_prob=0.2,
+                spam=True
+            )
+        else:
+            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat)
+    
+    net = Network(nodes)
+    
+    # Run for f_hat + 1 rounds
+    rounds = f_hat + 2  # +2 to include round 0 and final decision round
+    for r in range(rounds):
+        print(f"\n--- DS-CPA Round {r} ---")
+        net.run_round(r)
+        
+        # Debug: Show extracted sets
+        for i in sorted(nodes.keys()):
+            if i not in B:
+                behavior = nodes[i].behavior
+                if isinstance(behavior, HonestDSCPA):
+                    if behavior.extracted_set:
+                        print(f"Node {i} extracted set: {behavior.extracted_set}")
+        
+        # Show decisions at the end
+        if r >= f_hat + 1:
+            for i in sorted(nodes.keys()):
+                node = nodes[i]
+                if node.decided:
+                    print(f"Node {i} decided on: {node.value}")
+    
     decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
     return decided, B

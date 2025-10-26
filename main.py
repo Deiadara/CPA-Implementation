@@ -4,6 +4,7 @@ from CPA import (
     run_cpa_with_dealer_signature,
     run_cpa_with_per_node_threshold,
     run_cpa_with_dealer_signature_and_per_node_threshold,
+    run_ds_cpa,
     predict_cpa_outcome_for_constant_t,
     evaluate_execution,
 )
@@ -11,8 +12,8 @@ from CPA import (
 
 def parse_args_once():
     parser = argparse.ArgumentParser(description="Run CPA or CPA-with-signatures.")
-    parser.add_argument("--exec", choices=["plain", "signed", "per_node_t", "signed_per_node_t"], default="plain", help="Execution type")
-    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite", "complete_bipartite", "star", "hypercube"], default="complete_multipartite", help="Graph type")
+    parser.add_argument("--exec", choices=["plain", "signed", "per_node_t", "signed_per_node_t", "ds_cpa"], default="plain", help="Execution type")
+    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite", "complete_bipartite", "star", "hypercube", "custom"], default="complete_multipartite", help="Graph type")
     parser.add_argument("--n", type=int, default=10, help="Number of nodes")
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
     parser.add_argument("--dealer-value", type=int, default=1, help="Dealer value")
@@ -20,6 +21,7 @@ def parse_args_once():
     parser.add_argument("--t-func", type=int, choices=[1,2,3,4,5,6], default=1, help="Per-node t(u) function when --exec per_node_t: 1) t(u)=1; 2) t(u)=u; 3) t(u)=u^2; 4) t(u)=u%%2; 5) t(u)=u%%5; 6) t(u)=rand(0,n)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for fault sampling")
     parser.add_argument("--subset-sizes", type=str, default="3,3,3", help="Subset sizes for complete_multipartite or complete_bipartite (e.g. 3,3,3 or 4,6)")
+    parser.add_argument("--custom-graph", type=str, default=None, help="Path to JSON file for custom graph (required when --graph custom)")
     return parser
 
 
@@ -39,6 +41,7 @@ def run_once(args):
         seed=args.seed,
         graph=args.graph,
         subset_sizes=subset_sizes,
+        custom_graph_path=args.custom_graph,
     )
 
     if args.exec == "plain":
@@ -54,6 +57,18 @@ def run_once(args):
             seed=args.seed,
             graph=args.graph,
             subset_sizes=subset_sizes,
+            custom_graph_path=args.custom_graph,
+        )
+    elif args.exec == "ds_cpa":
+        decided, B = run_ds_cpa(
+            n=args.n,
+            sender_id=args.dealer_id,
+            sender_value=args.dealer_value,
+            t=args.t,
+            seed=args.seed,
+            graph=args.graph,
+            subset_sizes=subset_sizes,
+            custom_graph_path=args.custom_graph,
         )
     else:
         decided, B = run_cpa_with_dealer_signature_and_per_node_threshold(
@@ -64,6 +79,7 @@ def run_once(args):
             seed=args.seed,
             graph=args.graph,
             subset_sizes=subset_sizes,
+            custom_graph_path=args.custom_graph,
         )
 
     print("Byzantine set (t-local):", B)
@@ -80,7 +96,7 @@ def run_once(args):
     # Predict outcome for plain CPA based on K only in constant-t case
     if args.exec == "plain":
         from CPA import _build_graph  # reuse to ensure same adjacency
-        nodes_tmp = _build_graph(args.graph, args.n, args.dealer_id, subset_sizes)
+        nodes_tmp = _build_graph(args.graph, args.n, args.dealer_id, subset_sizes, args.custom_graph)
         adj_tmp = {i: set(nodes_tmp[i].neighbors) for i in nodes_tmp}
         K_val, verdict = predict_cpa_outcome_for_constant_t(adj_tmp, args.dealer_id, args.t)
         print(f"K(G,D)={K_val}; predicted plain CPA outcome at t={args.t}: {verdict}")
@@ -99,12 +115,14 @@ if __name__ == "__main__":
         print("- complete_multipartite: additionally uses --subset-sizes (e.g. 4,3,3)")
         print("- complete_bipartite: uses --subset-sizes as a,b (e.g. 4,6)")
         print("- star: uses --n (creates n-1 leaves)")
-        print("- hypercube: uses --n; builds 2^d nodes with 2^d <= n (rounds down)\n")
+        print("- hypercube: uses --n; builds 2^d nodes with 2^d <= n (rounds down)")
+        print("- custom: uses --custom-graph to specify path to JSON file\n")
         print("Execution modes:")
         print("- plain: classic CPA, decides at t+1")
         print("- signed: CPA with dealer signature, no threshold; accept only dealer-signed value")
         print("- per_node_t: CPA with per-node threshold t(u); decides at t(u)+1")
-        print("- signed_per_node_t: both dealer signatures and per-node t(u) thresholds\n")
+        print("- signed_per_node_t: both dealer signatures and per-node t(u) thresholds")
+        print("- ds_cpa: Dolev-Strong combined with CPA (runs for n-2 rounds)\n")
         print("t(u) functions (for per_node_t):")
         print("  1) t(u) = 1")
         print("  2) t(u) = u  (u = 1-based node index)")
@@ -117,7 +135,9 @@ if __name__ == "__main__":
         print("  --exec signed --graph complete_multipartite --subset-sizes 4,3,3 --n 10 --dealer-id 0 --dealer-value 1 --t 3")
         print("  --exec per_node_t --t-func 4 --graph line --n 8 --seed 42")
         print("  --exec signed_per_node_t --t-func 5 --graph complete --n 10 --seed 7")
-        print("  --exec signed --graph line --n 8 --seed 42\n")
+        print("  --exec signed --graph line --n 8 --seed 42")
+        print("  --exec plain --graph custom --custom-graph my_graph.json --dealer-id 0 --dealer-value 1 --t 2")
+        print("  --exec ds_cpa --graph complete --n 6 --dealer-id 0 --dealer-value 1 --t 1 --seed 42\n")
         print("Other commands:")
         print("  help  | ?   Show this help")
         print("  exit  | quit  Exit the REPL\n")
