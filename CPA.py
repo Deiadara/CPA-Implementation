@@ -141,6 +141,309 @@ def predict_cpa_outcome_for_constant_t(adj: dict[int, set[int]], dealer_id: int,
     verdict = "succeeds" if 2*t < K else ("fails" if t >= K else "unknown")
     return K, verdict
 
+
+def check_t_local_cut_exists(adj: dict[int, set[int]], v: int, t: int) -> bool:
+    """
+    Check if there exists a t-local cut with respect to node v.
+    
+    A t-local cut with respect to v exists if:
+    - We can remove at most t neighbors of v (forming set B with |B ∩ N(v)| ≤ t)
+    - This separates v from some other nodes (creates a graph partition)
+    - AND importantly: the remaining graph (excluding v and B) is NOT empty and NOT fully connected to v
+    
+    In other words: removing ≤ t of v's neighbors creates TWO+ non-trivial components
+    where at least one component doesn't contain v and has ≥ 2 nodes.
+    
+    Returns True if a t-local cut exists, False otherwise.
+    """
+    n = len(adj)
+    if n <= 2:
+        # With ≤ 2 nodes, can't have a meaningful separation
+        return False
+    
+    neighbors_v = adj.get(v, set())
+    
+    # Special case: if v has <= t neighbors, check if removing them creates a non-trivial separation
+    if len(neighbors_v) <= t:
+        # Remove v and all its neighbors, check if remaining graph is non-empty and connected
+        removed = {v} | neighbors_v
+        remaining = set(adj.keys()) - removed
+        
+        if len(remaining) <= 1:
+            # No non-trivial separation (remaining part has ≤ 1 node)
+            return False
+        
+        # Check if remaining nodes form a connected component
+        # If they do, then removing v + its neighbors doesn't create a separation
+        # (the rest of the graph stays connected)
+        if _is_connected_subgraph(adj, remaining):
+            # Remaining graph is connected, so this is NOT a t-local cut
+            # (we just isolated v, but didn't separate the graph)
+            return False
+        else:
+            # Remaining graph is disconnected, so we created a separation
+            return True
+    
+    # General case: try removing each subset of size ≤ t from v's neighbors
+    # Check if any such removal creates a separation
+    from itertools import combinations
+    
+    for subset_size in range(1, min(t + 1, len(neighbors_v)) + 1):
+        for removed_neighbors in combinations(neighbors_v, subset_size):
+            removed_set = set(removed_neighbors)
+            
+            # Check if removing these neighbors separates the graph
+            # The remaining graph should have v in one component and other nodes in another
+            remaining_neighbors = neighbors_v - removed_set
+            
+            if not remaining_neighbors:
+                # v becomes isolated, check if rest is non-trivial
+                remaining_nodes = set(adj.keys()) - {v} - removed_set
+                if len(remaining_nodes) >= 2 and not _is_connected_subgraph(adj, remaining_nodes):
+                    return True
+                continue
+            
+            # Check if v can reach all other nodes through remaining neighbors
+            reachable_from_v = _get_reachable(adj, v, removed_set)
+            unreachable = set(adj.keys()) - reachable_from_v - removed_set
+            
+            if len(unreachable) >= 2:
+                # Found nodes unreachable from v after removing the subset
+                # This is a t-local cut
+                return True
+    
+    return False
+
+
+def _can_reach_with_more_than_t_neighbors(adj: dict[int, set[int]], v: int, target: int, t: int) -> bool:
+    """
+    Check if we can reach target from v through more than t of v's neighbors.
+    Returns True if target is reachable through > t different neighbors of v.
+    """
+    neighbors_v = adj.get(v, set())
+    
+    # If target is a direct neighbor, it's reachable through itself
+    if target in neighbors_v:
+        return True
+    
+    # Count how many of v's neighbors can reach target
+    reachable_count = 0
+    for neighbor in neighbors_v:
+        # BFS from this neighbor to target (without going back through v)
+        if _bfs_without_node(adj, neighbor, target, v):
+            reachable_count += 1
+            if reachable_count > t:
+                return True
+    
+    return False
+
+
+def _bfs_without_node(adj: dict[int, set[int]], start: int, target: int, blocked: int) -> bool:
+    """BFS from start to target, without passing through blocked node."""
+    if start == target:
+        return True
+    
+    visited = {start, blocked}
+    queue = collections.deque([start])
+    
+    while queue:
+        node = queue.popleft()
+        for neighbor in adj.get(node, set()):
+            if neighbor == target:
+                return True
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(neighbor)
+    
+    return False
+
+
+def _is_connected_subgraph(adj: dict[int, set[int]], nodes: set[int]) -> bool:
+    """Check if the given set of nodes forms a connected subgraph."""
+    if not nodes:
+        return True
+    if len(nodes) == 1:
+        return True
+    
+    # BFS from arbitrary node in the set
+    start = next(iter(nodes))
+    visited = {start}
+    queue = collections.deque([start])
+    
+    while queue:
+        node = queue.popleft()
+        for neighbor in adj.get(node, set()):
+            if neighbor in nodes and neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(neighbor)
+    
+    return len(visited) == len(nodes)
+
+
+def _get_reachable(adj: dict[int, set[int]], start: int, blocked: set[int]) -> set[int]:
+    """Get all nodes reachable from start without passing through blocked nodes."""
+    reachable = {start}
+    queue = collections.deque([start])
+    
+    while queue:
+        node = queue.popleft()
+        for neighbor in adj.get(node, set()):
+            if neighbor not in blocked and neighbor not in reachable:
+                reachable.add(neighbor)
+                queue.append(neighbor)
+    
+    return reachable
+
+
+def _compute_vertex_connectivity(adj: dict[int, set[int]]) -> int:
+    """
+    Compute the vertex connectivity of the graph.
+    
+    Vertex connectivity = minimum number of vertices whose removal disconnects the graph.
+    
+    Uses NetworkX for efficient computation.
+    """
+    import networkx as nx
+    
+    n = len(adj)
+    if n <= 1:
+        return n
+    
+    # Build NetworkX graph from adjacency dict
+    G = nx.Graph()
+    G.add_nodes_from(adj.keys())
+    for node, neighbors in adj.items():
+        for neighbor in neighbors:
+            G.add_edge(node, neighbor)
+    
+    # Compute vertex connectivity
+    # This is the size of the minimum vertex cut
+    return nx.node_connectivity(G)
+
+
+def predict_ds_cpa_outcome_for_any_dealer(adj: dict[int, set[int]], t: int) -> tuple[bool, str]:
+    """
+    Predict if DS-CPA will succeed for ANY dealer choice.
+    
+    According to Theorem 4.29: DS-CPA achieves Byzantine Broadcast if for every v ∈ V
+    there does not exist a t-local cut.
+    
+    A t-local node cut (separator) S exists if:
+    1. Removing S disconnects the graph
+    2. |S ∩ N(v)| ≤ t for every node v (t-locality constraint)
+    3. S does not contain the sender/dealer (dealer is always honest)
+    
+    This checks if for ANY possible dealer, the graph remains connected after removing
+    any valid t-local Byzantine set.
+    
+    Returns:
+        (has_cut, verdict) where:
+        - has_cut: True if a t-local separator exists for some dealer
+        - verdict: "succeeds" or "fails"
+    """
+    n = len(adj)
+    
+    if n <= 2:
+        return False, "succeeds"
+    
+    # For each possible dealer, check if there exists a t-local cut
+    # (excluding the dealer from Byzantine set)
+    for dealer in adj:
+        if _has_t_local_cut_excluding_dealer(adj, dealer, t):
+            # Found a dealer for which a t-local cut exists
+            return True, "fails"
+    
+    # No t-local cut exists for any dealer choice
+    return False, "succeeds"
+
+
+def predict_ds_cpa_outcome(adj: dict[int, set[int]], sender_id: int, t: int) -> tuple[bool, str]:
+    """
+    Predict if DS-CPA will succeed for a SPECIFIC sender/dealer.
+    
+    According to Theorem 4.29: DS-CPA achieves Byzantine Broadcast if there does not
+    exist a t-local cut (where dealer is always honest).
+    
+    A t-local node cut (separator) S exists if:
+    1. Removing S disconnects the graph
+    2. |S ∩ N(v)| ≤ t for every node v (t-locality constraint)
+    3. S does not contain the sender/dealer (dealer is always honest)
+    
+    Returns:
+        (has_cut, verdict) where:
+        - has_cut: True if a t-local separator exists (excluding dealer)
+        - verdict: "succeeds" or "fails"
+    """
+    n = len(adj)
+    
+    if n <= 2:
+        return False, "succeeds"
+    
+    # Check if there exists a t-local cut that excludes the specific dealer
+    has_cut = _has_t_local_cut_excluding_dealer(adj, sender_id, t)
+    
+    if has_cut:
+        return True, "fails"
+    else:
+        return False, "succeeds"
+
+
+def _has_t_local_cut_excluding_dealer(adj: dict[int, set[int]], dealer: int, t: int) -> bool:
+    """
+    Check if there exists a t-local separator S where dealer ∉ S.
+    
+    Algorithm:
+    1. Find all minimal vertex cuts of size ≤ t
+    2. Check if any such cut is t-local AND doesn't contain dealer
+    """
+    import networkx as nx
+    from itertools import combinations
+    
+    n = len(adj)
+    all_nodes = set(adj.keys())
+    non_dealer_nodes = all_nodes - {dealer}
+    
+    # Build NetworkX graph
+    G = nx.Graph()
+    G.add_nodes_from(adj.keys())
+    for node, neighbors in adj.items():
+        for neighbor in neighbors:
+            G.add_edge(node, neighbor)
+    
+    # Try all subsets of non-dealer nodes of size 1 to t
+    for size in range(1, min(t + 1, len(non_dealer_nodes)) + 1):
+        for separator_tuple in combinations(non_dealer_nodes, size):
+            separator = set(separator_tuple)
+            
+            # Check if this separator disconnects the graph
+            remaining = all_nodes - separator
+            if len(remaining) <= 1:
+                continue
+            
+            # Check if graph is disconnected after removing separator
+            G_remaining = G.subgraph(remaining)
+            if not nx.is_connected(G_remaining):
+                # This is a separator! Now check if it's t-local
+                if _is_t_local_set(adj, separator, t):
+                    # Found a t-local separator that doesn't include dealer
+                    return True
+    
+    return False
+
+
+def _is_t_local_set(adj: dict[int, set[int]], node_set: set[int], t: int) -> bool:
+    """
+    Check if a set of nodes satisfies the t-locality constraint.
+    
+    A set S is t-local if |S ∩ N(v)| ≤ t for every node v.
+    """
+    for v in adj:
+        neighbors_v = adj[v]
+        intersection = node_set & neighbors_v
+        if len(intersection) > t:
+            return False
+    return True
+
 def predict_cpa_outcome_for_constant_t_and_signatures(adj: dict[int, set[int]], dealer_id: int, t: int) -> tuple[int, str]:
     # Heuristic based on literature: CPA succeeds if t < K(G,D)
     K = compute_K(adj, dealer_id)

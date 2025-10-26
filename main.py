@@ -6,6 +6,7 @@ from CPA import (
     run_cpa_with_dealer_signature_and_per_node_threshold,
     run_ds_cpa,
     predict_cpa_outcome_for_constant_t,
+    predict_ds_cpa_outcome,
     evaluate_execution,
 )
 
@@ -100,6 +101,24 @@ def run_once(args):
         adj_tmp = {i: set(nodes_tmp[i].neighbors) for i in nodes_tmp}
         K_val, verdict = predict_cpa_outcome_for_constant_t(adj_tmp, args.dealer_id, args.t)
         print(f"K(G,D)={K_val}; predicted plain CPA outcome at t={args.t}: {verdict}")
+    
+    # Predict outcome for DS-CPA based on t-local cuts
+    if args.exec == "ds_cpa":
+        from CPA import _build_graph  # reuse to ensure same adjacency
+        nodes_tmp = _build_graph(args.graph, args.n, args.dealer_id, subset_sizes, args.custom_graph)
+        adj_tmp = {i: set(nodes_tmp[i].neighbors) for i in nodes_tmp}
+        has_cut, verdict = predict_ds_cpa_outcome(adj_tmp, args.dealer_id, args.t)
+        if has_cut:
+            print(f"t-local cut exists (excluding sender {args.dealer_id}); predicted DS-CPA outcome at t={args.t}: {verdict}")
+        else:
+            print(f"No t-local cut (sender {args.dealer_id} always honest); predicted DS-CPA outcome at t={args.t}: {verdict}")
+        
+        # Compare prediction with actual result
+        actual_result = "succeeds" if success else "fails"
+        if verdict == actual_result:
+            print(f"✓ Prediction matches actual result: {actual_result}")
+        else:
+            print(f"✗ Prediction mismatch: predicted {verdict}, actual {actual_result}")
 
 
 if __name__ == "__main__":
