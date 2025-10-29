@@ -145,3 +145,70 @@ def build_hypercube_graph(n, dealer_id=0):
         G = nx.hypercube_graph(d)
     G = nx.convert_node_labels_to_integers(G)
     return nodes_from_networkx(G)
+
+def build_cycle_graph(n, dealer_id=0):
+    """Build a cycle graph (ring): nodes arranged in a circle."""
+    if n < 3:
+        # For n < 3, cycle doesn't make sense, use line
+        return build_line_graph(n, dealer_id)
+    G = nx.cycle_graph(n)
+    return nodes_from_networkx(G)
+
+def build_dense_random_graph(n, dealer_id=0, seed=None):
+    """Build a dense random graph with high connectivity (p=0.6)."""
+    if seed is not None:
+        import random
+        random.seed(seed)
+    # Dense: probability p = 0.6 means ~60% of possible edges exist
+    G = nx.erdos_renyi_graph(n, p=0.6, seed=seed)
+    # Ensure connected
+    while not nx.is_connected(G):
+        G = nx.erdos_renyi_graph(n, p=0.6, seed=seed)
+        if seed is not None:
+            seed += 1
+    return nodes_from_networkx(G)
+
+def build_sparse_random_graph(n, dealer_id=0, seed=None):
+    """Build a sparse random graph with low connectivity (p=0.2)."""
+    if seed is not None:
+        import random
+        random.seed(seed)
+    # Sparse: probability p = 0.2 means ~20% of possible edges exist
+    G = nx.erdos_renyi_graph(n, p=0.2, seed=seed)
+    # Ensure connected
+    while not nx.is_connected(G):
+        G = nx.erdos_renyi_graph(n, p=0.2, seed=seed)
+        if seed is not None:
+            seed += 1
+    return nodes_from_networkx(G)
+
+def build_random_regular_graph(n, dealer_id=0, degree=3, seed=None):
+    """Build a random regular graph where each node has the same degree."""
+    if n <= degree:
+        # If n too small for requested degree, use complete graph
+        return build_complete_graph(n, dealer_id)
+    if (n * degree) % 2 != 0:
+        # For regular graph to exist, n*d must be even
+        degree = degree + 1 if degree < n - 1 else degree - 1
+    try:
+        G = nx.random_regular_graph(degree, n, seed=seed)
+        return nodes_from_networkx(G)
+    except nx.NetworkXError:
+        # Fallback to complete graph if regular graph can't be created
+        return build_complete_graph(n, dealer_id)
+
+def build_grid_2d_graph(n, dealer_id=0):
+    """Build a 2D grid graph (lattice structure)."""
+    import math
+    # Find dimensions close to sqrt(n) x sqrt(n)
+    rows = int(math.sqrt(n))
+    cols = (n + rows - 1) // rows  # Ceiling division
+    G = nx.grid_2d_graph(rows, cols)
+    # Remove extra nodes if rows*cols > n
+    nodes_to_remove = []
+    for node in G.nodes():
+        if node[0] * cols + node[1] >= n:
+            nodes_to_remove.append(node)
+    G.remove_nodes_from(nodes_to_remove)
+    G = nx.convert_node_labels_to_integers(G, first_label=0)
+    return nodes_from_networkx(G)
