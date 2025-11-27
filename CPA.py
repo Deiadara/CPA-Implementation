@@ -364,8 +364,8 @@ def run_cpa_with_adversary(
         print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
     net.deliver(initial_out)
 
-    max_dist = _graph_diameter_from_dealer(adj, dealer_id)
-    rounds = max_dist + 1
+    # Run for n rounds (worst case: line graph has diameter n-1)
+    rounds = n
     for r in range(1, rounds + 1):
         print(f"\n--- Round {r} ---")
         net.run_round(r)
@@ -382,7 +382,7 @@ def run_cpa_with_adversary(
     return decided, B
 
 
-# ---------------- Signed CPA variant ----------------
+# ---------------- Signed CPA variant (σ-CPA) ----------------
 
 def _encode_value_bytes(value: int) -> bytes:
     # Deterministic, fixed-length encoding of the integer value
@@ -475,8 +475,8 @@ def run_cpa_with_dealer_signature(
         print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
     net.deliver(initial_out)
 
-    max_dist = _graph_diameter_from_dealer(adj, dealer_id)
-    rounds = max_dist + 1
+    # σ-CPA runs for n rounds (worst case: line graph has diameter n-1)
+    rounds = n
     for r in range(1, rounds + 1):  
         print(f"\n--- Round {r} ---")
         net.run_round(r)
@@ -618,8 +618,8 @@ def run_cpa_with_per_node_threshold(
         print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
     net.deliver(initial_out)
 
-    max_dist = _graph_diameter_from_dealer(adj, dealer_id)
-    rounds = max_dist + 1
+    # Run for n rounds (worst case: line graph has diameter n-1)
+    rounds = n
     for r in range(1, rounds + 1):
         print(f"\n--- Round {r} ---")
         net.run_round(r)
@@ -732,8 +732,8 @@ def run_cpa_with_dealer_signature_and_per_node_threshold(
         print(f"Dealer {dealer_id} sending to neighbor {nid}: value={dealer_value}")
     net.deliver(initial_out)
 
-    max_dist = _graph_diameter_from_dealer(adj, dealer_id)
-    rounds = max_dist + 1
+    # Run for n rounds (worst case: line graph has diameter n-1)
+    rounds = n
     for r in range(1, rounds + 1):
         print(f"\n--- Round {r} ---")
         net.run_round(r)
@@ -767,50 +767,42 @@ class HonestDSCPA(Behavior):
     DS-CPA (Dolev-Strong combined with CPA) behavior.
     
     DS-CPA runs for f̂ + 1 rounds where f̂ = n - 2. Each "broadcast" in the 
-    Dolev-Strong protocol is replaced by a σ-CPA execution. A DS-CPA round is 
-    defined as the time needed for a message to traverse through the diameter d.
-    
-    IMPORTANT: Each DS-CPA round lasts for d message-passing rounds, where d is
-    the diameter of the graph. This allows σ-CPA to propagate messages throughout
-    the entire network before moving to the next DS-CPA round.
+    Dolev-Strong protocol is replaced by a σ-CPA execution. Each DS-CPA round
+    lasts n message-passing rounds (worst case for σ-CPA to complete).
     
     Protocol:
-    - DS-Round 0 (msg rounds 0 to d-1): Sender invokes σ-CPA with < b, sig(b) >
-    - DS-Round r (msg rounds r*d to (r+1)*d-1): For each message b̃ with r signatures:
+    - DS-Round 0: Sender invokes σ-CPA with < b, sig(b) >
+    - DS-Round R (1 to f̂+1): For each message b̃ with r signatures from distinct
+      nodes including sender:
         - If b̃ ∉ Vi: add to Vi, sign it, invoke σ-CPA with r+1 signatures
     - After f̂+1 DS-rounds: output single value in Vi, or 0 if |Vi| ≠ 1
+    
+    σ-CPA for each broadcast: Accept message if signature chain is valid 
+    (all signatures verify and sender/dealer is in chain), then relay to 
+    all neighbors. No threshold counting - resilience comes from graph 
+    structure (no t-local cut).
     """
     def __init__(self, sender_id: int, all_public_keys: dict[int, Ed25519PublicKey], 
-                 my_private_key: Optional[Ed25519PrivateKey], f_hat: int, t: int, diameter: int):
+                 my_private_key: Optional[Ed25519PrivateKey], f_hat: int, n: int):
         self.sender_id = sender_id
         self.all_public_keys = all_public_keys
         self.my_private_key = my_private_key
         self.f_hat = f_hat  # f̂ = n - 2
-        self.t = t  # t-local corruption bound
-        self.diameter = diameter  # Graph diameter (each DS-CPA round lasts d msg rounds)
+        self.n = n  # Number of nodes (each DS-CPA round lasts n msg rounds)
         self.extracted_set = set()  # Vi in the protocol
         
-        # Track messages for CPA threshold logic - BY VALUE
-        # CPA threshold is about getting t+1 confirmations for a VALUE,
-        # regardless of signature chains (multiple nodes can have different chains)
-        # Format: {value: {'senders': set(), 'best_chain': signature_chain}}
-        self.message_tracker_by_value = collections.defaultdict(lambda: {'senders': set(), 'best_chain': None})
-        
-        # Messages accepted and ready to broadcast in next DS-CPA round
+        # Messages accepted and ready to broadcast
         self.accepted_messages = []
         
         # Track which messages we've already broadcast to avoid duplicates
-        # Track by (value, our_signature) to avoid broadcasting same value multiple times
+        # Track by (value, frozenset(signers)) to avoid broadcasting same value/chain
         self.broadcasted_messages = set()  # Set of (value, frozenset(signers))
-        
-        # Track when we've already broadcast our messages for current DS-CPA round
-        self.current_ds_round_broadcasted = False
         
     def on_receive(self, node, msg):
         if not isinstance(msg, DSCPAMessage):
             return
             
-        # Verify the signature chain
+        # Verify the signature chain (σ-CPA: accept only valid signatures)
         if not self._verify_signature_chain(msg):
             return
             
@@ -822,56 +814,39 @@ class HonestDSCPA(Behavior):
         
         value = msg.value
         
-        # Track this message for CPA threshold logic - BY VALUE
-        # Multiple signature chains for same value count toward threshold
-        tracker = self.message_tracker_by_value[value]
-        tracker['senders'].add(msg.sender)
-        # Keep the longest/best chain we've seen
-        if tracker['best_chain'] is None or len(msg.signature_chain) > len(tracker['best_chain']):
-            tracker['best_chain'] = msg.signature_chain
-        
-        senders = tracker['senders']
-        
-        # CPA logic (σ-CPA): Accept message if received from t+1 distinct neighbors
-        # OR if it's directly from the sender/dealer (first hop special case)
-        if msg.sender == self.sender_id or len(senders) >= self.t + 1:
-            # If value not in extracted set, add it and prepare to relay
-            if value not in self.extracted_set:
-                self.extracted_set.add(value)
+        # σ-CPA acceptance: Valid signature chain is sufficient
+        # No t+1 threshold - resilience comes from graph structure (no t-local cut)
+        # If value not in extracted set, add it and prepare to relay
+        if value not in self.extracted_set:
+            self.extracted_set.add(value)
+            
+            # Prepare to broadcast with our signature added (Dolev-Strong)
+            if self.my_private_key and node.id not in signers:
+                new_chain = list(msg.signature_chain)
+                my_sig = self.my_private_key.sign(_encode_value_bytes(value))
+                new_chain.append((node.id, my_sig))
                 
-                # Prepare to broadcast with our signature added
-                # Use the best chain we've seen for this value
-                best_chain = tracker['best_chain'] if tracker['best_chain'] else msg.signature_chain
-                
-                if self.my_private_key and node.id not in signers:
-                    new_chain = list(best_chain)
-                    my_sig = self.my_private_key.sign(_encode_value_bytes(value))
-                    new_chain.append((node.id, my_sig))
-                    
-                    self.accepted_messages.append({
-                        'value': value,
-                        'chain': new_chain,
-                        'ds_round': len(new_chain)  # DS-CPA round = number of signatures
-                    })
+                self.accepted_messages.append({
+                    'value': value,
+                    'chain': new_chain,
+                    'ds_round': len(new_chain)  # DS-CPA round = number of signatures
+                })
     
     def on_round(self, node, rnd):
         """
         Called each message-passing round.
         
-        Each DS-CPA round lasts for `diameter` message-passing rounds.
-        DS-round r spans message rounds [r*diameter, (r+1)*diameter - 1].
+        Each DS-CPA round lasts for n message-passing rounds (worst case for σ-CPA).
+        DS-round r spans message rounds [r*n, (r+1)*n - 1].
         
-        σ-CPA works like normal CPA: nodes broadcast immediately after accepting
-        messages (when t+1 threshold is met), allowing continuous propagation.
-        
-        The DS-CPA round structure is about which signature counts are being processed,
-        but within each DS-round, σ-CPA propagates messages continuously.
+        σ-CPA: nodes broadcast immediately after accepting messages with valid
+        signatures, allowing continuous propagation through the network.
         """
         out = []
         
         # Calculate current DS-CPA round from message-passing round
-        ds_round = rnd // self.diameter
-        round_phase = rnd % self.diameter  # Position within current DS-CPA round
+        ds_round = rnd // self.n
+        round_phase = rnd % self.n  # Position within current DS-CPA round
         
         # DS-Round 0, Phase 0: Only the sender initiates σ-CPA
         if rnd == 0 and node.id == self.sender_id:
@@ -888,7 +863,7 @@ class HonestDSCPA(Behavior):
                     out.append((nid, DSCPAMessage("DS-CPA", node.id, node.value, 1, chain)))
         
         # Every round: broadcast any accepted messages that haven't been sent yet
-        # This implements σ-CPA: immediate relay after acceptance (CPA behavior)
+        # This implements σ-CPA: immediate relay after acceptance
         else:
             # Broadcast all accepted messages that haven't been broadcast yet
             messages_to_send = []
@@ -898,7 +873,7 @@ class HonestDSCPA(Behavior):
                     messages_to_send.append(msg_data)
                     self.broadcasted_messages.add(msg_key)
             
-            # Broadcast to all neighbors
+            # Broadcast to all neighbors (σ-CPA propagation)
             for msg_data in messages_to_send:
                 for nid in node.neighbors:
                     out.append((nid, DSCPAMessage("DS-CPA", node.id, msg_data['value'], 
@@ -908,8 +883,9 @@ class HonestDSCPA(Behavior):
             self.accepted_messages = [m for m in self.accepted_messages 
                                      if (m['value'], frozenset(s for s, _ in m['chain'])) not in self.broadcasted_messages]
         
-        # Decision at the end of f_hat DS-CPA rounds (last message-passing round)
-        if ds_round == self.f_hat and round_phase == self.diameter - 1:
+        # Decision at the end of f_hat+1 DS-CPA rounds (last message-passing round)
+        # Total rounds = (f_hat + 1) * n, so we decide at the end of DS-round f_hat
+        if ds_round == self.f_hat and round_phase == self.n - 1:
             if len(self.extracted_set) == 1:
                 # Output the single value
                 node.decide(list(self.extracted_set)[0])
@@ -951,23 +927,25 @@ def run_ds_cpa(
     Run DS-CPA (Dolev-Strong combined with CPA) protocol.
     
     DS-CPA replaces each broadcast in Dolev-Strong with a σ-CPA (CPA with signatures) 
-    execution. It runs for f̂ + 1 DS-CPA rounds where f̂ = n - 2 (maximum possible 
-    corrupted nodes under t-local corruption when exact count is unknown).
+    execution. It runs for f̂ + 1 DS-CPA rounds where f̂ = n - 2.
     
     Each DS-CPA round consists of:
-    1. Nodes receive messages with r signatures
-    2. Apply CPA threshold logic (t+1 distinct senders or from original sender)
+    1. Nodes receive messages with r signatures from distinct nodes
+    2. Verify all signatures (σ-CPA: no threshold, just signature verification)
     3. Accept value into extracted set Vi
-    4. Sign and prepare to broadcast with r+1 signatures
+    4. Sign and broadcast with r+1 signatures using σ-CPA
     
-    Each "broadcast" uses σ-CPA: messages propagate through neighbors with CPA's
-    t+1 threshold, ensuring Byzantine resilience under t-local corruption.
+    Total rounds: (f̂ + 1) * n message-passing rounds
+    - f̂ + 1 = n - 1 DS-CPA rounds
+    - Each DS-CPA round uses n message rounds for σ-CPA propagation
+    
+    DS-CPA and σ-CPA have the SAME resilience: both succeed iff no t-local cut exists.
     
     Args:
         n: Number of nodes
         sender_id: ID of the sender/dealer node
         sender_value: Value to broadcast
-        t: Parameter for t-local corruption bound (used in CPA threshold)
+        t: Parameter for t-local corruption bound (for sampling Byzantine set)
         seed: Random seed for fault sampling
         graph: Graph type
         subset_sizes: Subset sizes for multipartite graphs
@@ -987,10 +965,6 @@ def run_ds_cpa(
     print(f"Byzantine set (t-local): {B}")
     print(f"t-local corruption bound: {t}")
     
-    # Calculate graph diameter (critical for DS-CPA round duration)
-    diameter = _graph_diameter_from_dealer(adj, sender_id)
-    print(f"Graph diameter from sender: {diameter}")
-    
     # Generate keypairs for all nodes
     private_keys = {}
     public_keys = {}
@@ -1003,19 +977,19 @@ def run_ds_cpa(
     f_hat = n - 2
     
     # Calculate total message-passing rounds:
-    # DS-CPA runs for f̂ + 1 DS-rounds, each lasting `diameter` message-passing rounds
+    # DS-CPA runs for f̂ + 1 DS-rounds, each lasting n message-passing rounds
     ds_cpa_rounds = f_hat + 1  # DS-CPA rounds (0 to f̂)
-    total_msg_rounds = ds_cpa_rounds * diameter  # Total message-passing rounds
+    total_msg_rounds = ds_cpa_rounds * n  # Total message-passing rounds
     
     print(f"Running DS-CPA:")
     print(f"  - DS-CPA rounds: {ds_cpa_rounds} (rounds 0 to {f_hat})")
-    print(f"  - Each DS-round lasts: {diameter} message-passing rounds")
+    print(f"  - Each DS-round lasts: {n} message-passing rounds")
     print(f"  - Total message-passing rounds: {total_msg_rounds}")
     
     # Assign behaviors
     for i in nodes:
         if i == sender_id:
-            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat, t, diameter)
+            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat, n)
             nodes[i].value = sender_value
         elif i in B:
             # Byzantine nodes - use equivocator
@@ -1025,19 +999,19 @@ def run_ds_cpa(
                 spam=True
             )
         else:
-            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat, t, diameter)
+            nodes[i].behavior = HonestDSCPA(sender_id, public_keys, private_keys[i], f_hat, n)
     
     net = Network(nodes)
     
     # Run for all message-passing rounds
     for r in range(total_msg_rounds):
-        ds_round = r // diameter
-        msg_phase = r % diameter
-        print(f"\n--- Message Round {r} (DS-Round {ds_round}, phase {msg_phase}/{diameter-1}) ---")
+        ds_round = r // n
+        msg_phase = r % n
+        print(f"\n--- Message Round {r} (DS-Round {ds_round}, phase {msg_phase}/{n-1}) ---")
         net.run_round(r)
         
         # Debug: Show extracted sets (only at DS-round boundaries to reduce output)
-        if msg_phase == 0 or msg_phase == diameter - 1:
+        if msg_phase == 0 or msg_phase == n - 1:
             for i in sorted(nodes.keys()):
                 if i not in B:
                     behavior = nodes[i].behavior
@@ -1046,12 +1020,297 @@ def run_ds_cpa(
                             print(f"Node {i} extracted set: {behavior.extracted_set}")
         
         # Show decisions (happens at end of last DS-CPA round)
-        if ds_round == f_hat and msg_phase == diameter - 1:
+        if ds_round == f_hat and msg_phase == n - 1:
             print(f"\n--- DECISION TIME (end of DS-Round {f_hat}) ---")
             for i in sorted(nodes.keys()):
                 node = nodes[i]
                 if node.decided:
                     print(f"Node {i} decided on: {node.value}")
+    
+    decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
+    return decided, B
+
+
+# ---------------- B-CPA (Bracha's CPA) variant ----------------
+
+@dataclass
+class BCPAMessage:
+    """Message for B-CPA protocol."""
+    mtype: str  # "PROPOSE", "ECHO", or "VOTE"
+    original_sender: int  # Who initiated this CPA broadcast
+    value: int
+    rnd: int
+    forwarder: int = 0  # Who forwarded this message
+
+
+class HonestBCPA(Behavior):
+    """
+    B-CPA (Bracha's CPA) behavior for Byzantine Reliable Broadcast.
+    
+    Handles dishonest dealer through echo/vote quorum intersection.
+    Uses CPA (with relay) for each message type propagation.
+    
+    Assumptions:
+    - n ≥ 3f + 1 (at least 2/3 honest)
+    - No t-plp cut exists in the graph (for CPA propagation)
+    
+    Protocol:
+    1. Dealer D sends value x_D to all via CPA (PROPOSE)
+    2. Upon receiving v from Dealer's CPA (first value): send <echo, v> via CPA
+    3. Upon receiving <echo, v> from n-f distinct nodes: send <vote, v> via CPA
+    4. Upon receiving <vote, v> from f+1 distinct nodes: send <vote, v> via CPA
+    5. Upon receiving <vote, v> from n-f distinct nodes: deliver on v
+    """
+    def __init__(self, dealer_id: int, n: int, f: int, t: int):
+        self.dealer_id = dealer_id
+        self.n = n
+        self.f = f  # Max Byzantine nodes (global f for n ≥ 3f+1)
+        self.t = t  # t-local corruption bound for CPA threshold
+        
+        # Track messages by (mtype, value, original_sender) -> set of forwarders
+        self.cpa_received: dict[tuple, set[int]] = collections.defaultdict(set)
+        
+        # Track which (mtype, value, original_sender) we've already relayed
+        self.already_relayed: set[tuple] = set()
+        
+        # Echo/Vote tracking: value -> set of original senders accepted
+        self.echo_received: dict[int, set[int]] = collections.defaultdict(set)
+        self.vote_received: dict[int, set[int]] = collections.defaultdict(set)
+        
+        # State
+        self.dealer_value_received: Optional[int] = None
+        self.echoed_value: Optional[int] = None
+        self.voted_value: Optional[int] = None
+        
+        # Pending relays (messages to forward via CPA)
+        self.pending_relays: list[tuple[str, int, int]] = []  # (mtype, value, original_sender)
+        
+    def on_receive(self, node, msg):
+        if not isinstance(msg, BCPAMessage):
+            return
+        
+        mtype = msg.mtype
+        value = msg.value
+        original_sender = msg.original_sender
+        forwarder = msg.forwarder
+        
+        # CPA reception tracking
+        key = (mtype, value, original_sender)
+        self.cpa_received[key].add(forwarder)
+        
+        # CPA acceptance: from original sender (direct neighbor) or t+1 distinct forwarders
+        direct_from_sender = (forwarder == original_sender)
+        threshold_met = len(self.cpa_received[key]) >= self.t + 1
+        
+        # Accept and relay if we haven't already
+        if (direct_from_sender or threshold_met) and key not in self.already_relayed:
+            self.already_relayed.add(key)
+            # Queue for CPA relay
+            self.pending_relays.append((mtype, value, original_sender))
+            
+            # Process based on message type
+            if mtype == "PROPOSE" and original_sender == self.dealer_id:
+                # First value from dealer triggers ECHO
+                if self.dealer_value_received is None:
+                    self.dealer_value_received = value
+                    if self.echoed_value is None:
+                        self.echoed_value = value
+                        # Queue our own ECHO for broadcast
+                        echo_key = ("ECHO", value, node.id)
+                        if echo_key not in self.already_relayed:
+                            self.already_relayed.add(echo_key)
+                            self.pending_relays.append(("ECHO", value, node.id))
+            
+            elif mtype == "ECHO":
+                self.echo_received[value].add(original_sender)
+                
+                # n-f echoes -> send VOTE
+                if len(self.echo_received[value]) >= self.n - self.f:
+                    if self.voted_value is None:
+                        self.voted_value = value
+                        vote_key = ("VOTE", value, node.id)
+                        if vote_key not in self.already_relayed:
+                            self.already_relayed.add(vote_key)
+                            self.pending_relays.append(("VOTE", value, node.id))
+            
+            elif mtype == "VOTE":
+                self.vote_received[value].add(original_sender)
+                
+                # f+1 votes -> amplify (send VOTE if haven't voted)
+                if len(self.vote_received[value]) >= self.f + 1:
+                    if self.voted_value is None:
+                        self.voted_value = value
+                        vote_key = ("VOTE", value, node.id)
+                        if vote_key not in self.already_relayed:
+                            self.already_relayed.add(vote_key)
+                            self.pending_relays.append(("VOTE", value, node.id))
+                
+                # n-f votes -> deliver
+                if len(self.vote_received[value]) >= self.n - self.f:
+                    if not node.decided:
+                        node.decide(value)
+    
+    def on_round(self, node, rnd):
+        out = []
+        
+        # CPA relay: forward all accepted messages to neighbors
+        for mtype, value, original_sender in self.pending_relays:
+            for nid in node.neighbors:
+                out.append((nid, BCPAMessage(mtype, original_sender, value, rnd, node.id)))
+        
+        self.pending_relays.clear()
+        
+        return out
+
+
+def predict_bcpa_outcome(adj: dict[int, set[int]], n: int, f: int) -> tuple[bool, str]:
+    """
+    Predict if B-CPA will succeed.
+    
+    B-CPA requires:
+    1. n ≥ 3f + 1 (quorum intersection property)
+    2. No t-plp cut exists (for CPA propagation)
+    
+    Returns (valid, verdict).
+    """
+    if n < 3 * f + 1:
+        return False, "fails (n < 3f+1)"
+    return True, "succeeds"
+
+
+def run_bcpa(
+    n: int = 10,
+    dealer_id: int = 0,
+    dealer_value: int = 1,
+    f: int = 0,
+    t: int = 0,
+    seed: Optional[int] = None,
+    graph: str = "complete",
+    subset_sizes: Optional[tuple[int, ...]] = None,
+    custom_graph_path: Optional[str] = None,
+    dealer_is_byzantine: bool = False,
+):
+    """
+    Run B-CPA (Bracha's CPA) protocol for Byzantine Reliable Broadcast.
+    
+    B-CPA handles dishonest dealers through echo/vote quorum intersection.
+    Uses CPA for each broadcast step.
+    
+    Assumptions:
+    - n ≥ 3f + 1
+    - No t-plp cut exists in the graph
+    
+    Protocol:
+    1. Dealer broadcasts value via CPA (PROPOSE)
+    2. Nodes echo first value received (ECHO)  
+    3. n-f echoes -> send VOTE
+    4. f+1 votes -> amplify VOTE
+    5. n-f votes -> deliver
+    
+    Args:
+        n: Number of nodes
+        dealer_id: Dealer node ID
+        dealer_value: Value to broadcast (may differ if dealer is Byzantine)
+        f: Maximum global Byzantine nodes
+        t: t-local corruption bound for CPA
+        seed: Random seed
+        graph: Graph type
+        subset_sizes: Subset sizes for multipartite graphs
+        custom_graph_path: Custom graph path
+        dealer_is_byzantine: If True, dealer is Byzantine
+    
+    Returns:
+        (decided, B) tuple
+    """
+    nodes = _build_graph(graph, n, dealer_id, subset_sizes, custom_graph_path, seed)
+    adj = {i: set(nodes[i].neighbors) for i in nodes}
+    
+    # Sample Byzantine nodes
+    B = sample_t_local_faulty_set(adj, t=t, seed=seed)
+    
+    if dealer_is_byzantine:
+        B.add(dealer_id)
+    else:
+        B.discard(dealer_id)
+    
+    # Cap at f Byzantine nodes
+    while len(B) > f:
+        B.pop()
+    
+    print(f"Graph topology: {adj}")
+    print(f"Byzantine set: {B}")
+    print(f"Dealer {dealer_id} is {'Byzantine' if dealer_id in B else 'honest'}")
+    print(f"n={n}, f={f}, t={t}")
+    print(f"Condition n >= 3f+1: {n} >= {3*f+1} = {n >= 3*f+1}")
+    
+    valid, verdict = predict_bcpa_outcome(adj, n, f)
+    print(f"B-CPA prediction: {verdict}")
+    
+    # Assign behaviors
+    for i in nodes:
+        if i in B:
+            nodes[i].behavior = ByzantineEquivocator(
+                value_picker=lambda rnd: (dealer_value, dealer_value + 1),
+                withhold_prob=0.3,
+                spam=True
+            )
+        else:
+            nodes[i].behavior = HonestBCPA(dealer_id, n, f, t)
+    
+    net = Network(nodes)
+    
+    # Dealer initiates PROPOSE phase
+    if dealer_id not in B:
+        initial_out = []
+        for nid in nodes[dealer_id].neighbors:
+            initial_out.append((nid, BCPAMessage("PROPOSE", dealer_id, dealer_value, 0, dealer_id)))
+            print(f"Dealer {dealer_id} sending PROPOSE to {nid}: value={dealer_value}")
+        net.deliver(initial_out)
+        
+        # Dealer also echoes (triggers own ECHO)
+        behavior = nodes[dealer_id].behavior
+        if isinstance(behavior, HonestBCPA):
+            behavior.dealer_value_received = dealer_value
+            behavior.echoed_value = dealer_value
+            # Mark as already relayed and queue for broadcast
+            propose_key = ("PROPOSE", dealer_value, dealer_id)
+            echo_key = ("ECHO", dealer_value, dealer_id)
+            behavior.already_relayed.add(propose_key)
+            behavior.already_relayed.add(echo_key)
+            behavior.pending_relays.append(("ECHO", dealer_value, dealer_id))
+            # Count dealer's echo
+            behavior.echo_received[dealer_value].add(dealer_id)
+    
+    # Run for 4n rounds (4 phases × n rounds each for worst-case propagation)
+    total_rounds = 4 * n
+    print(f"\nRunning B-CPA for {total_rounds} rounds")
+    
+    for r in range(1, total_rounds + 1):
+        phase = (r - 1) // n
+        phase_names = ["PROPOSE", "ECHO", "VOTE", "DELIVER"]
+        
+        if r % n == 1:
+            print(f"\n=== Phase {phase}: {phase_names[min(phase, 3)]} ===")
+        
+        print(f"\n--- Round {r} ---")
+        net.run_round(r)
+        
+        # Show state at phase boundaries
+        if r % n == 0:
+            for i in sorted(nodes.keys()):
+                if i not in B:
+                    behavior = nodes[i].behavior
+                    if isinstance(behavior, HonestBCPA):
+                        echo_counts = {v: len(s) for v, s in behavior.echo_received.items() if s}
+                        vote_counts = {v: len(s) for v, s in behavior.vote_received.items() if s}
+                        if echo_counts or vote_counts or nodes[i].decided:
+                            print(f"Node {i}: echoes={echo_counts}, votes={vote_counts}, decided={nodes[i].decided}")
+    
+    print(f"\n=== FINAL RESULTS ===")
+    for i in sorted(nodes.keys()):
+        node = nodes[i]
+        status = "Byzantine" if i in B else ("decided" if node.decided else "undecided")
+        print(f"Node {i}: {status}, value={node.value}")
     
     decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
     return decided, B
