@@ -16,7 +16,7 @@ from CPA import (
 def parse_args_once():
     parser = argparse.ArgumentParser(description="Run CPA or CPA-with-signatures.")
     parser.add_argument("--exec", choices=["plain", "signed", "per_node_t", "signed_per_node_t", "ds_cpa", "bcpa"], default="plain", help="Execution type")
-    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite", "complete_bipartite", "star", "hypercube", "custom"], default="complete_multipartite", help="Graph type")
+    parser.add_argument("--graph", choices=["line", "complete", "complete_multipartite", "complete_bipartite", "star", "hypercube", "cycle", "dense_random", "sparse_random", "random_regular", "grid", "custom"], default="complete_multipartite", help="Graph type")
     parser.add_argument("--n", type=int, default=10, help="Number of nodes")
     parser.add_argument("--dealer-id", type=int, default=0, help="Dealer node id")
     parser.add_argument("--dealer-value", type=int, default=1, help="Dealer value")

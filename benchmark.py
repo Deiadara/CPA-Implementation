@@ -1,12 +1,4 @@
-"""
-Comprehensive benchmark comparing CPA, σ-CPA, DS-CPA, and B-CPA protocols.
-
-This benchmark:
-1. Tests specific corruption scenarios showing differences between algorithms
-2. Runs random corruption samples for statistical analysis (parallelized)
-3. Tracks actual rounds needed (when all honest nodes decided)
-4. Compares honest vs dishonest dealer scenarios
-"""
+"""Comprehensive benchmark comparing CPA, σ-CPA, DS-CPA, and B-CPA protocols."""
 
 import io
 import sys
@@ -48,8 +40,8 @@ class BenchmarkResult:
     graph: str
     n: int
     success: bool
-    protocol_rounds: int  # Total rounds the protocol runs
-    actual_rounds: int  # Round when all honest nodes decided
+    protocol_rounds: int
+    actual_rounds: int
     honest_decided: int
     total_honest: int
     dealer_byzantine: bool
@@ -89,8 +81,6 @@ def run_cpa_with_round_tracking(n, dealer_id, dealer_value, t, seed, graph, subs
     
     for r in range(1, rounds + 1):
         net.run_round(r)
-        
-        # Check if all honest nodes have decided
         all_decided = all(nodes[i].decided for i in nodes if i not in B)
         if all_decided and actual_round == rounds:
             actual_round = r
@@ -211,17 +201,7 @@ def run_ds_cpa_with_round_tracking(n, sender_id, sender_value, t, seed, graph, s
 def run_bcpa_with_round_tracking(n, dealer_id, dealer_value, f, t, seed, graph, 
                                   subset_sizes=None, dealer_is_byzantine=False,
                                   timeout_rounds=None):
-    """
-    Run B-CPA and track when all honest nodes decided.
-    
-    For dishonest dealer scenarios (asynchronous model), we use a timeout.
-    After timeout, we check if Agreement holds (all honest that decided agree).
-    
-    Success conditions (Byzantine Reliable Broadcast):
-    - Termination: All honest nodes decide (or timeout with partial decision)
-    - Agreement: All honest nodes that decided agree on same value
-    - Validity: If dealer honest, honest nodes decide on dealer's value
-    """
+    """Run B-CPA and track when all honest nodes decided."""
     nodes = _build_graph(graph, n, dealer_id, subset_sizes, None, seed)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
     
@@ -248,7 +228,6 @@ def run_bcpa_with_round_tracking(n, dealer_id, dealer_value, f, t, seed, graph,
     net = Network(nodes)
     
     if dealer_id not in B:
-        # Honest dealer: send consistent PROPOSE to all neighbors
         initial_out = []
         for nid in nodes[dealer_id].neighbors:
             initial_out.append((nid, BCPAMessage("PROPOSE", dealer_id, dealer_value, 0, dealer_id)))
@@ -265,20 +244,14 @@ def run_bcpa_with_round_tracking(n, dealer_id, dealer_value, f, t, seed, graph,
             behavior.pending_relays.append(("ECHO", dealer_value, dealer_id))
             behavior.echo_received[dealer_value].add(dealer_id)
     else:
-        # Byzantine dealer: equivocates by sending different values
-        # For B-CPA to potentially succeed, we need enough nodes to receive same value
-        # to reach quorum (n-f). With n >= 3f+1, if majority gets same value, quorum possible.
         neighbors = list(nodes[dealer_id].neighbors)
         initial_out = []
-        
-        # Send to 2/3 of neighbors value 0 (to enable potential quorum), 1/3 get value 1
         cutoff = (2 * len(neighbors)) // 3
         for i, nid in enumerate(neighbors):
             val = 0 if i < cutoff else 1
             initial_out.append((nid, BCPAMessage("PROPOSE", dealer_id, val, 0, dealer_id)))
         net.deliver(initial_out)
     
-    # Default timeout: 4n rounds, but can be overridden for async simulation
     total_rounds = timeout_rounds if timeout_rounds else 4 * n
     actual_round = total_rounds
     
@@ -291,52 +264,28 @@ def run_bcpa_with_round_tracking(n, dealer_id, dealer_value, f, t, seed, graph,
     
     decided = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
     
-    # Evaluate success based on Byzantine Reliable Broadcast properties
     honest_values = set()
     honest_decided_count = 0
-    honest_undecided = 0
-    decided_value = None
     for nid, (d, v) in decided.items():
-        if nid not in B:
-            if d:
-                honest_decided_count += 1
-                honest_values.add(v)
-                decided_value = v
-            else:
-                honest_undecided += 1
+        if nid not in B and d:
+            honest_decided_count += 1
+            honest_values.add(v)
     
     total_honest = len([i for i in nodes if i not in B])
     
     if dealer_id not in B:
-        # Honest dealer: Validity requires all decide on dealer's value
-        # Termination: all honest decide
-        # Agreement: all same value
         all_decided_correctly = all(
             decided[i][0] and decided[i][1] == dealer_value 
             for i in nodes if i not in B
         )
         success = all_decided_correctly
     else:
-        # Dishonest dealer (asynchronous model):
-        # - Termination NOT guaranteed (may not decide)
-        # - Agreement: all honest that decided agree on same value
-        # - Safety: not deciding is acceptable (better than disagreement)
-        
-        # Success = Agreement holds (0 or 1 distinct values among decided honest)
-        # With 0 decided, Agreement vacuously holds (safe)
         agreement_holds = len(honest_values) <= 1
-        
-        # In async model with dishonest dealer:
-        # - 0 decided = safe (no disagreement possible)
-        # - All decided same value = Agreement achieved
-        # Both are "success" in the sense of not violating Agreement
         success = agreement_holds
     
-    # For dishonest dealer, report decided count regardless of value
     if dealer_id in B:
         return success, total_rounds, actual_round, honest_decided_count, total_honest, B
     else:
-        # For honest dealer, report how many decided on dealer's value
         honest_on_dealer_value = sum(1 for nid, (d, v) in decided.items() 
                                      if nid not in B and d and v == dealer_value)
         return success, total_rounds, actual_round, honest_on_dealer_value, total_honest, B
@@ -350,7 +299,6 @@ def run_benchmark_scenario(scenario_name, n, graph, t, seed, dealer_value=1,
     if f is None:
         f = (n - 1) // 3
     
-    # Run CPA (honest dealer only)
     if not test_dishonest_dealer:
         success, proto_rounds, actual, decided, total, B = run_cpa_with_round_tracking(
             n, dealer_id, dealer_value, t, seed, graph, subset_sizes
@@ -359,7 +307,6 @@ def run_benchmark_scenario(scenario_name, n, graph, t, seed, dealer_value=1,
             "CPA", graph, n, success, proto_rounds, actual, decided, total, False, B
         ))
     
-    # Run σ-CPA (honest dealer only)
     if not test_dishonest_dealer:
         success, proto_rounds, actual, decided, total, B = run_sigma_cpa_with_round_tracking(
             n, dealer_id, dealer_value, t, seed, graph, subset_sizes
@@ -368,7 +315,6 @@ def run_benchmark_scenario(scenario_name, n, graph, t, seed, dealer_value=1,
             "σ-CPA", graph, n, success, proto_rounds, actual, decided, total, False, B
         ))
     
-    # Run DS-CPA
     success, proto_rounds, actual, decided, total, B = run_ds_cpa_with_round_tracking(
         n, dealer_id, dealer_value, t, seed, graph, subset_sizes
     )
@@ -376,7 +322,6 @@ def run_benchmark_scenario(scenario_name, n, graph, t, seed, dealer_value=1,
         "DS-CPA", graph, n, success, proto_rounds, actual, decided, total, test_dishonest_dealer, B
     ))
     
-    # Run B-CPA
     success, proto_rounds, actual, decided, total, B = run_bcpa_with_round_tracking(
         n, dealer_id, dealer_value, f, t, seed, graph, subset_sizes, 
         dealer_is_byzantine=test_dishonest_dealer
@@ -390,28 +335,21 @@ def run_benchmark_scenario(scenario_name, n, graph, t, seed, dealer_value=1,
 
 def run_unified_benchmark_single(n, graph, t, seed, dealer_value=1, dealer_id=0, 
                                   subset_sizes=None, f=None):
-    """
-    Run all protocols on the SAME graph and corruption set.
-    This ensures fair comparison - same Byzantine nodes for all algorithms.
-    """
+    """Run all protocols on the SAME graph and corruption set."""
     if f is None:
         f = (n - 1) // 3
     
-    # Build graph ONCE
     nodes = _build_graph(graph, n, dealer_id, subset_sizes, None, seed)
     adj = {i: set(nodes[i].neighbors) for i in nodes}
     
-    # Sample corruption set ONCE
     B = sample_t_local_faulty_set(adj, t=t, seed=seed)
-    B.discard(dealer_id)  # Dealer is always honest
+    B.discard(dealer_id)
     
-    # Cap at f Byzantine nodes
     while len(B) > f:
         B.pop()
     
     results = {}
     
-    # Run CPA with this specific corruption set
     success, proto_rounds, actual, decided, total = _run_cpa_on_graph(
         nodes, adj, B, dealer_id, dealer_value, t, n
     )
@@ -420,7 +358,6 @@ def run_unified_benchmark_single(n, graph, t, seed, dealer_value=1, dealer_id=0,
         "decided": decided, "total": total, "B": B
     }
     
-    # Run σ-CPA with same corruption set
     success, proto_rounds, actual, decided, total = _run_sigma_cpa_on_graph(
         nodes, adj, B, dealer_id, dealer_value, n
     )
@@ -429,7 +366,6 @@ def run_unified_benchmark_single(n, graph, t, seed, dealer_value=1, dealer_id=0,
         "decided": decided, "total": total, "B": B
     }
     
-    # Run DS-CPA with same corruption set
     success, proto_rounds, actual, decided, total = _run_ds_cpa_on_graph(
         nodes, adj, B, dealer_id, dealer_value, n
     )
@@ -438,7 +374,6 @@ def run_unified_benchmark_single(n, graph, t, seed, dealer_value=1, dealer_id=0,
         "decided": decided, "total": total, "B": B
     }
     
-    # Run B-CPA with same corruption set
     success, proto_rounds, actual, decided, total = _run_bcpa_on_graph(
         nodes, adj, B, dealer_id, dealer_value, n, f, t
     )
@@ -453,9 +388,7 @@ def run_unified_benchmark_single(n, graph, t, seed, dealer_value=1, dealer_id=0,
 def _run_cpa_on_graph(nodes_template, adj, B, dealer_id, dealer_value, t, n):
     """Run CPA on a pre-built graph with specific Byzantine set."""
     from node import Node
-    from copy import deepcopy
     
-    # Rebuild nodes for fresh state
     nodes = {}
     for nid in nodes_template:
         nodes[nid] = Node(nid)
@@ -623,7 +556,6 @@ def _run_bcpa_on_graph(nodes_template, adj, B, dealer_id, dealer_value, n, f, t)
     
     net = Network(nodes)
     
-    # Dealer initiates
     initial_out = []
     for nid in nodes[dealer_id].neighbors:
         initial_out.append((nid, BCPAMessage("PROPOSE", dealer_id, dealer_value, 0, dealer_id)))
@@ -651,17 +583,20 @@ def _run_bcpa_on_graph(nodes_template, adj, B, dealer_id, dealer_value, n, f, t)
     
     decided_dict = {i: (nodes[i].decided, nodes[i].value) for i in nodes}
     
-    # Check validity for honest dealer
-    all_correct = all(
-        decided_dict[i][0] and decided_dict[i][1] == dealer_value 
-        for i in nodes if i not in B
-    )
-    success = all_correct
-    
-    honest_decided = sum(1 for i, (d, v) in decided_dict.items() if i not in B and d and v == dealer_value)
+    honest_values = set()
+    honest_decided_count = 0
     total_honest = len([i for i in nodes if i not in B])
     
-    return success, total_rounds, actual_round, honest_decided, total_honest
+    for nid, (d, v) in decided_dict.items():
+        if nid not in B and d:
+            honest_decided_count += 1
+            honest_values.add(v)
+    
+    agreement_holds = len(honest_values) <= 1
+    validity_holds = honest_values <= {dealer_value}
+    success = agreement_holds and validity_holds
+    
+    return success, total_rounds, actual_round, honest_decided_count, total_honest
 
 
 def _run_unified_sample(args):
@@ -684,7 +619,6 @@ def run_unified_benchmark(n, graph, t, num_samples=100, f=None, subset_sizes=Non
     
     protocol_rounds = {}
     
-    # Track when algorithms agree/disagree
     both_succeed = 0
     cpa_only = 0
     sigma_only = 0
@@ -704,7 +638,6 @@ def run_unified_benchmark(n, graph, t, num_samples=100, f=None, subset_sizes=Non
             stats[proto]["total_actual_rounds"] += r["actual"]
             stats[proto]["total_decided"] += r["decided"] / r["total"] if r["total"] > 0 else 0
         
-        # Track CPA vs σ-CPA comparison
         cpa_s = results["CPA"]["success"]
         sigma_s = results["σ-CPA"]["success"]
         if cpa_s and sigma_s:
@@ -725,12 +658,10 @@ def run_unified_benchmark(n, graph, t, num_samples=100, f=None, subset_sizes=Non
                     results, B = future.result()
                     process_result(results, B)
         except (PermissionError, OSError):
-            # Fall back to sequential execution
             for args in args_list:
                 results, B = _run_unified_sample(args)
                 process_result(results, B)
     else:
-        # Sequential execution
         for args in args_list:
             results, B = _run_unified_sample(args)
             process_result(results, B)
@@ -787,7 +718,6 @@ def run_statistical_benchmark(n, graph, t, num_samples=100, f=None, subset_sizes
     args_list = [(n, graph, t, seed, f, subset_sizes) for seed in range(num_samples)]
     
     if parallel and num_samples > 10:
-        # Use parallel execution
         num_workers = min(multiprocessing.cpu_count(), 8)
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = [executor.submit(_run_single_sample, args) for args in args_list]
@@ -801,7 +731,6 @@ def run_statistical_benchmark(n, graph, t, num_samples=100, f=None, subset_sizes
                     stats[r.protocol]["total_actual_rounds"] += r.actual_rounds
                     stats[r.protocol]["total_decided"] += r.honest_decided / r.total_honest
     else:
-        # Sequential execution
         for args in args_list:
             results = _run_single_sample(args)
             for r in results:
@@ -821,7 +750,6 @@ def _run_dishonest_sample(args):
     
     results = {}
     
-    # DS-CPA with dishonest dealer
     success, proto_rounds, actual, decided, total, B = run_ds_cpa_with_round_tracking(
         n, 0, 1, t, seed, graph, subset_sizes
     )
@@ -830,7 +758,6 @@ def _run_dishonest_sample(args):
         "actual": actual, "decided": decided, "total": total
     }
     
-    # B-CPA with dishonest dealer
     success, proto_rounds, actual, decided, total, B = run_bcpa_with_round_tracking(
         n, 0, 1, f, t, seed, graph, subset_sizes, 
         dealer_is_byzantine=True, timeout_rounds=4*n
@@ -891,19 +818,14 @@ def main():
     print("BYZANTINE BROADCAST PROTOCOL BENCHMARK")
     print("=" * 80)
     
-    # Suppress verbose output
     old_stdout = sys.stdout
     
-    # ============================================================
-    # PART 1: Specific scenarios showing protocol differences
-    # ============================================================
     print("\n" + "=" * 80)
     print("PART 1: SPECIFIC SCENARIOS SHOWING PROTOCOL DIFFERENCES")
     print("=" * 80)
     
     scenarios = []
     
-    # Scenario 1: All protocols succeed (complete graph, low corruption)
     print("\nScenario 1: All protocols should succeed (complete graph, t=1)")
     sys.stdout = io.StringIO()
     results1 = run_benchmark_scenario("All Succeed", n=10, graph="complete", t=1, seed=42)
@@ -911,10 +833,8 @@ def main():
     print_scenario_results("All Succeed (Complete Graph, n=10, t=1)", results1)
     scenarios.append(("All Succeed", results1))
     
-    # Scenario 2: Only σ-CPA and DS-CPA/B-CPA succeed (signature advantage)
     print("\nScenario 2: σ-CPA succeeds, CPA fails (random regular graph)")
     sys.stdout = io.StringIO()
-    # Try different seeds to find one where CPA fails but σ-CPA succeeds
     for test_seed in range(100):
         results2 = run_benchmark_scenario("Sigma Advantage", n=10, graph="random_regular", t=1, seed=test_seed)
         cpa_success = next((r.success for r in results2 if r.protocol == "CPA"), False)
@@ -925,7 +845,6 @@ def main():
     print_scenario_results("σ-CPA Succeeds, CPA Fails (Random Regular, n=10, t=1)", results2)
     scenarios.append(("Sigma Advantage", results2))
     
-    # Scenario 3: Line graph - challenging for all
     print("\nScenario 3: Line graph (challenging topology)")
     sys.stdout = io.StringIO()
     results3 = run_benchmark_scenario("Line Graph", n=8, graph="line", t=0, seed=42)
@@ -933,7 +852,6 @@ def main():
     print_scenario_results("Line Graph (n=8, t=0)", results3)
     scenarios.append(("Line Graph", results3))
     
-    # Scenario 4: Star graph (dealer at center)
     print("\nScenario 4: Star graph (dealer at center)")
     sys.stdout = io.StringIO()
     results4 = run_benchmark_scenario("Star Graph", n=10, graph="star", t=1, seed=42)
@@ -941,15 +859,11 @@ def main():
     print_scenario_results("Star Graph (n=10, t=1)", results4)
     scenarios.append(("Star Graph", results4))
     
-    # ============================================================
-    # PART 2: Dishonest Dealer Scenarios (B-CPA and DS-CPA only)
-    # ============================================================
     print("\n" + "=" * 80)
     print("PART 2: DISHONEST DEALER SCENARIOS (B-CPA and DS-CPA only)")
     print("=" * 80)
     print("Note: CPA and σ-CPA require honest dealer - not tested here")
     
-    # Scenario 5: Dishonest dealer on complete graph
     print("\nScenario 5: Dishonest dealer (complete graph)")
     sys.stdout = io.StringIO()
     results5 = run_benchmark_scenario("Dishonest Dealer Complete", n=10, graph="complete", 
@@ -958,7 +872,6 @@ def main():
     print_scenario_results("Dishonest Dealer (Complete, n=10, f=3)", results5)
     scenarios.append(("Dishonest Dealer Complete", results5))
     
-    # Scenario 6: Dishonest dealer on multipartite graph
     print("\nScenario 6: Dishonest dealer (multipartite graph)")
     sys.stdout = io.StringIO()
     results6 = run_benchmark_scenario("Dishonest Dealer Multipartite", n=9, 
@@ -976,21 +889,17 @@ def main():
     print("  This is SAFE behavior: better to not decide than to disagree.")
     print("  DS-CPA, being synchronous, can guarantee termination even with dishonest dealer.")
     
-    # ============================================================
-    # PART 3: UNIFIED BENCHMARK (same corruption set for all algorithms)
-    # ============================================================
     print("\n" + "=" * 80)
     print("PART 3: UNIFIED BENCHMARK (same corruption for all algorithms)")
     print("=" * 80)
     print("Each sample: build graph once, sample corruption once, run ALL algorithms")
     
-    # 5 graph types × 100 samples = 500 total per algorithm
     unified_configs = [
-        ("Complete", 15, "complete", 1, None),
-        ("Dense Random", 15, "dense_random", 1, None),
-        ("Random Regular", 15, "random_regular", 1, None),
+        ("Complete", 15, "complete", 3, None),
+        ("Dense Random", 15, "dense_random", 3, None),
+        ("Random Regular", 15, "random_regular", 3, None),
         ("Cycle", 15, "cycle", 1, None),
-        ("Hypercube", 16, "hypercube", 1, None),  # 16 = 2^4 for proper hypercube
+        ("Hypercube", 16, "hypercube", 3, None),
     ]
     
     all_stats = []
@@ -1000,7 +909,6 @@ def main():
     print(f"Using {multiprocessing.cpu_count()} CPU cores for parallel execution")
     print(f"Running {NUM_SAMPLES} samples × {len(unified_configs)} graph types = {NUM_SAMPLES * len(unified_configs)} total")
     
-    # Aggregate stats across all graph types
     total_stats = {
         "CPA": {"successes": 0, "total_actual": 0, "total_coverage": 0, "count": 0},
         "σ-CPA": {"successes": 0, "total_actual": 0, "total_coverage": 0, "count": 0},
@@ -1032,13 +940,11 @@ def main():
             p_rounds = proto_rounds.get(proto, "N/A")
             print(f"{proto:<10} {success_pct:>9.1f}% {p_rounds:>12} {avg_actual:>12.1f} {avg_coverage:>11.1f}%")
             
-            # Aggregate
             total_stats[proto]["successes"] += s["successes"]
             total_stats[proto]["total_actual"] += s["total_actual_rounds"]
             total_stats[proto]["total_coverage"] += s["total_decided"]
             total_stats[proto]["count"] += num_samples
         
-        # B-CPA separately (async)
         s = stats["B-CPA"]
         success_pct = (s["successes"] / num_samples) * 100
         avg_coverage = (s["total_decided"] / num_samples) * 100
@@ -1049,7 +955,6 @@ def main():
         total_stats["B-CPA"]["total_coverage"] += s["total_decided"]
         total_stats["B-CPA"]["count"] += num_samples
         
-        # CPA vs σ-CPA comparison for this graph
         print(f"\nCPA vs σ-CPA comparison:")
         print(f"  Both succeed: {comparison['both_succeed']}")
         print(f"  σ-CPA only:   {comparison['sigma_only']}")
@@ -1062,7 +967,6 @@ def main():
         all_stats.append((name, n, stats, proto_rounds, comparison))
         all_comparisons.append((name, n, comparison))
     
-    # Print aggregate results
     print("\n" + "=" * 80)
     print(f"AGGREGATE RESULTS ({NUM_SAMPLES * len(unified_configs)} total samples)")
     print("=" * 80)
@@ -1078,7 +982,6 @@ def main():
         avg_coverage = (s["total_coverage"] / s["count"]) * 100 if s["count"] > 0 else 0
         print(f"{proto:<10} {success_pct:>9.1f}% {avg_actual:>12.1f} {avg_coverage:>11.1f}%")
     
-    # B-CPA separate
     s = total_stats["B-CPA"]
     bcpa_success = (s["successes"] / s["count"]) * 100 if s["count"] > 0 else 0
     bcpa_coverage = (s["total_coverage"] / s["count"]) * 100 if s["count"] > 0 else 0
@@ -1091,12 +994,8 @@ def main():
     print(f"  CPA only:        {total_comparison['cpa_only']} ({100*total_comparison['cpa_only']/total_samples:.1f}%)")
     print(f"  Neither:         {total_comparison['neither']} ({100*total_comparison['neither']/total_samples:.1f}%)")
     
-    # Skip the old separate benchmarks
     dishonest_stats = []
     
-    # ============================================================
-    # PART 4: Summary and LaTeX Output
-    # ============================================================
     print("\n" + "=" * 80)
     print("PART 4: SUMMARY")
     print("=" * 80)
@@ -1112,7 +1011,6 @@ def main():
     print("LATEX TABLE OUTPUT")
     print("=" * 80)
     
-    # Generate LaTeX for specific scenarios
     print("\n% Specific Scenarios Table")
     print("\\begin{table}[htbp]")
     print("\\centering")
@@ -1139,8 +1037,6 @@ def main():
     print("\\end{tabular}")
     print("\\end{table}")
     
-    # Generate LaTeX for unified statistical results (same corruption for all)
-    # Synchronous protocols table (CPA, σ-CPA, DS-CPA)
     print("\n% Synchronous Protocols Results")
     print("\\begin{table}[htbp]")
     print("\\centering")
@@ -1154,7 +1050,7 @@ def main():
     
     for name, n, stats, proto_rounds, comparison in all_stats:
         first = True
-        for proto in ["CPA", "σ-CPA", "DS-CPA"]:  # Exclude B-CPA from sync table
+        for proto in ["CPA", "σ-CPA", "DS-CPA"]:
             s = stats[proto]
             success_pct = (s["successes"] / NUM_SAMPLES) * 100
             avg_actual = s["total_actual_rounds"] / NUM_SAMPLES
@@ -1169,7 +1065,6 @@ def main():
     print("\\end{tabular}")
     print("\\end{table}")
     
-    # B-CPA separate table (asynchronous)
     print("\n% B-CPA Results (Asynchronous Protocol)")
     print("\\begin{table}[htbp]")
     print("\\centering")
@@ -1193,7 +1088,6 @@ def main():
     print("\\end{tabular}")
     print("\\end{table}")
     
-    # Generate LaTeX for CPA vs σ-CPA comparison table
     print("\n% CPA vs σ-CPA Head-to-Head Comparison")
     print("\\begin{table}[htbp]")
     print("\\centering")
@@ -1213,14 +1107,12 @@ def main():
         print(f"{name} ($n$={n}) & {both} & {sigma} & {cpa} & {neither} \\\\")
     print("\\hline")
     
-    # Aggregate row
     print(f"\\textbf{{Total}} & {total_comparison['both_succeed']} & {total_comparison['sigma_only']} & {total_comparison['cpa_only']} & {total_comparison['neither']} \\\\")
     print("\\hline")
     
     print("\\end{tabular}")
     print("\\end{table}")
     
-    # Aggregate summary table (synchronous only)
     print("\n% Aggregate Results - Synchronous Protocols")
     print("\\begin{table}[htbp]")
     print("\\centering")
@@ -1232,7 +1124,7 @@ def main():
     print("\\textbf{Protocol} & \\textbf{Success \\%} & \\textbf{Avg Actual Rounds} & \\textbf{Avg Coverage \\%} \\\\")
     print("\\hline")
     
-    for proto in ["CPA", "σ-CPA", "DS-CPA"]:  # Exclude B-CPA
+    for proto in ["CPA", "σ-CPA", "DS-CPA"]:
         s = total_stats[proto]
         success_pct = (s["successes"] / s["count"]) * 100 if s["count"] > 0 else 0
         avg_actual = s["total_actual"] / s["count"] if s["count"] > 0 else 0
@@ -1244,7 +1136,6 @@ def main():
     print("\\end{tabular}")
     print("\\end{table}")
     
-    # B-CPA aggregate (separate, noting it's async)
     s = total_stats["B-CPA"]
     bcpa_success = (s["successes"] / s["count"]) * 100 if s["count"] > 0 else 0
     bcpa_coverage = (s["total_coverage"] / s["count"]) * 100 if s["count"] > 0 else 0
